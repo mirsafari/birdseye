@@ -71,14 +71,27 @@ type Header struct {
 
 const (
 	headerLength = 127
-	// maxRead bounds one directory or tile read, so a damaged length
-	// cannot ask for gigabytes.
+	// rootWithin is how far into the archive the root directory ends at
+	// the latest: the spec keeps the header and the root directory in the
+	// first 16 KiB, so an archive can be opened with one read.
+	rootWithin = 16384
+	// maxRead bounds one tile read, so a damaged length cannot ask for
+	// gigabytes.
 	maxRead = 64 << 20
+	// maxDirectoryBytes bounds a directory, packed and unpacked. A leaf
+	// of Croatia's archive unpacks to 23 KB at most (4,096 entries); a
+	// directory holds at most a quarter as many entries as bytes, each
+	// kept in 24, so a bound on its bytes is a bound on what it costs.
+	maxDirectoryBytes = 4 << 20
 	// maxDepth is how many directories a lookup follows: the root and
 	// leaves below it (the spec's writers use at most two levels).
 	maxDepth = 4
-	// leafCacheSize is how many leaf directories are kept.
-	leafCacheSize = 256
+	// leafCacheSize is how many leaf directories are kept, and
+	// maxCachedEntries how many of their entries (24 MB of them) at most:
+	// a bound on the leaves alone let 256 of the largest directories pile
+	// up.
+	leafCacheSize    = 256
+	maxCachedEntries = 1 << 20
 )
 
 // ErrNotPMTiles is a file that does not start with a version 3 header.
@@ -92,6 +105,7 @@ type Reader struct {
 
 	mu     sync.Mutex
 	leaves map[uint64][]entry // by offset in the leaf section
+	cached int                // the entries of the leaves kept
 }
 
 // New reads the archive's header and root directory. It refuses tile
@@ -109,6 +123,9 @@ func New(src io.ReaderAt) (*Reader, error) {
 	case CompressionUnknown, CompressionNone, CompressionGzip:
 	default:
 		return nil, fmt.Errorf("pmtiles: tile compression %d: birdseye reads gzip or none", h.TileCompression)
+	}
+	if h.RootLength > rootWithin || h.RootOffset > rootWithin-h.RootLength {
+		return nil, fmt.Errorf("pmtiles: a root directory of %d bytes at %d does not end within the first %d bytes", h.RootLength, h.RootOffset, rootWithin)
 	}
 	r := &Reader{src: src, header: h, leaves: map[uint64][]entry{}}
 	if r.root, err = r.directory(h.RootOffset, h.RootLength); err != nil {
@@ -170,17 +187,33 @@ func (r *Reader) leaf(offset, length uint64) ([]entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("leaf directory: %w", err)
 	}
-	r.mu.Lock()
-	if len(r.leaves) >= leafCacheSize {
-		clear(r.leaves) // a bound, not a policy
-	}
-	r.leaves[offset] = dir
-	r.mu.Unlock()
+	r.keep(offset, dir)
 	return dir, nil
 }
 
-// directory reads, unpacks and decodes one directory.
+// keep keeps a leaf directory read, within leafCacheSize leaves and
+// maxCachedEntries entries; past either, the leaves kept are forgotten (a
+// bound, not a policy).
+func (r *Reader) keep(offset uint64, dir []entry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.leaves[offset]; ok {
+		return
+	}
+	if len(r.leaves) >= leafCacheSize || r.cached+len(dir) > maxCachedEntries {
+		clear(r.leaves)
+		r.cached = 0
+	}
+	r.leaves[offset] = dir
+	r.cached += len(dir)
+}
+
+// directory reads, unpacks and decodes one directory, within
+// maxDirectoryBytes packed and unpacked.
 func (r *Reader) directory(offset, length uint64) ([]entry, error) {
+	if length > maxDirectoryBytes {
+		return nil, fmt.Errorf("a directory of %d bytes, more than %d", length, maxDirectoryBytes)
+	}
 	raw, err := r.read(offset, length)
 	if err != nil {
 		return nil, err
@@ -188,7 +221,7 @@ func (r *Reader) directory(offset, length uint64) ([]entry, error) {
 	switch r.header.InternalCompression {
 	case CompressionUnknown, CompressionNone:
 	case CompressionGzip:
-		if raw, err = unzip.Limited(raw, maxRead); err != nil {
+		if raw, err = unzip.Limited(raw, maxDirectoryBytes); err != nil {
 			return nil, err
 		}
 	default:
