@@ -137,8 +137,8 @@ func (f feature) bounds() (lo, hi tpoint, ok bool) {
 			x += zigzag(g[i])
 			y += zigzag(g[i+1])
 			i += 2
-			lo.x, lo.y = math.Min(lo.x, float64(x)), math.Min(lo.y, float64(y))
-			hi.x, hi.y = math.Max(hi.x, float64(x)), math.Max(hi.y, float64(y))
+			lo.x, lo.y = min(lo.x, float64(x)), min(lo.y, float64(y))
+			hi.x, hi.y = max(hi.x, float64(x)), max(hi.y, float64(y))
 			ok = true
 		}
 	}

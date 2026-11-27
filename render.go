@@ -1,9 +1,10 @@
 package birdseye
 
 import (
+	"cmp"
 	"errors"
 	"math"
-	"sort"
+	"slices"
 )
 
 const (
@@ -113,7 +114,9 @@ func placeRadius(prisms []*prism) float64 {
 		c := centroid(p.outer.pts)
 		ns[i] = near{math.Hypot(c.x, c.y), footprint(p), p.whole()}
 	}
-	sort.Slice(ns, func(i, j int) bool { return ns[i].dist < ns[j].dist })
+	// Stable, so footprints at one distance (the parts of a tower) keep
+	// the tiles' order whatever the sort's algorithm.
+	slices.SortStableFunc(ns, func(a, b near) int { return cmp.Compare(a.dist, b.dist) })
 	r := MaxRadius
 	built := 0.0
 	buildings := map[*prism]bool{}
@@ -125,7 +128,7 @@ func placeRadius(prisms []*prism) float64 {
 			break
 		}
 	}
-	return math.Max(MinRadius, math.Min(MaxRadius, r))
+	return max(MinRadius, min(MaxRadius, r))
 }
 
 // footprint is a prism's ground area in square metres, courtyards
@@ -158,7 +161,7 @@ func draw(sc scene, radius float64) Picture {
 			continue
 		}
 		if holdsPin {
-			target = math.Max(target, p.z1)
+			target = max(target, p.z1)
 		}
 		b := p.whole()
 		if _, seen := buildings[b]; !seen && p.guessed {
@@ -190,7 +193,7 @@ func draw(sc scene, radius float64) Picture {
 				continue
 			}
 			if a := area(c); (i == 0) != (a > 0) {
-				reverse(c)
+				slices.Reverse(c)
 			}
 			rings = append(rings, c)
 		}
@@ -230,10 +233,4 @@ func holds(pr *prism, p point) bool {
 		}
 	}
 	return true
-}
-
-func reverse(pts []point) {
-	for i, j := 0, len(pts)-1; i < j; i, j = i+1, j-1 {
-		pts[i], pts[j] = pts[j], pts[i]
-	}
 }

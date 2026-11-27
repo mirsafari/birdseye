@@ -298,6 +298,36 @@ func TestClipRectMarksTheTileEdgeAsCut(t *testing.T) {
 	}
 }
 
+// TestAClippedLineComesBackInItsPieces: a line that leaves the window and
+// comes back is two pieces, cut where it crosses, and what runs on inside
+// stays one.
+func TestAClippedLineComesBackInItsPieces(t *testing.T) {
+	// Along y=50: in, out past the east side, back in, and on inside.
+	line := []tpoint{{10, 50}, {90, 50}, {150, 50}, {150, 60}, {90, 60}, {10, 60}}
+	got := clipLineRect(line, 100)
+	want := [][]tpoint{{{10, 50}, {90, 50}, {100, 50}}, {{100, 60}, {90, 60}, {10, 60}}}
+	if len(got) != len(want) || !slices.Equal(got[0], want[0]) || !slices.Equal(got[1], want[1]) {
+		t.Errorf("clipLineRect = %v, want %v", got, want)
+	}
+	if got := clipLineRect([]tpoint{{150, 10}, {150, 90}}, 100); got != nil {
+		t.Errorf("a line outside the square left %v", got)
+	}
+
+	// The same across a circle of 100 m: the chord's ends are on it.
+	street := []point{{-50, 0}, {50, 0}, {150, 0}, {150, 60}, {50, 60}, {-50, 60}}
+	parts := clipLineCircle(street, 100)
+	if len(parts) != 2 || len(parts[0]) != 3 || len(parts[1]) != 3 {
+		t.Fatalf("clipLineCircle = %v, want two pieces of three points", parts)
+	}
+	if end, start := parts[0][2], parts[1][0]; math.Abs(end.x-100) > 1e-9 || end.y != 0 || math.Abs(start.x-80) > 1e-9 || start.y != 60 {
+		t.Errorf("the pieces end at %v and start again at %v, want (100, 0) and (80, 60)", end, start)
+	}
+	// A point repeated along the line breaks nothing.
+	if got := clipLineCircle([]point{{-10, 0}, {-10, 0}, {10, 0}}, 100); len(got) != 1 || len(got[0]) != 2 {
+		t.Errorf("a line with a repeated point = %v", got)
+	}
+}
+
 // TestARingInsideItsTileIsWhatClippingWouldLeave: clipRect does not clip
 // a ring that stands inside the tile's square, and gives exactly what
 // clipping it gave, for every ring of every fixture tile.

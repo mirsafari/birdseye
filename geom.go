@@ -1,6 +1,9 @@
 package birdseye
 
-import "math"
+import (
+	"math"
+	"slices"
+)
 
 // ring is a closed outline without its closing point: the edge from the
 // last point runs back to the first. cut[i] marks the edge from pts[i] to
@@ -12,14 +15,7 @@ type ring struct {
 	cut []bool
 }
 
-func (r ring) hasCut() bool {
-	for _, c := range r.cut {
-		if c {
-			return true
-		}
-	}
-	return false
-}
+func (r ring) hasCut() bool { return slices.Contains(r.cut, true) }
 
 // area is the signed area of the points as a ring: positive when they run
 // counter-clockwise with y pointing north.
@@ -101,9 +97,9 @@ func (r ring) northOf(y float64) (out ring, ok bool) {
 func sharesCut(a, b ring) bool {
 	const eps = 1e-3 // metres; the two tiles place their shared edge a few nanometres apart
 	span := func(a0, a1, b0, b1 float64) (over, shorter float64) {
-		a0, a1 = math.Min(a0, a1), math.Max(a0, a1)
-		b0, b1 = math.Min(b0, b1), math.Max(b0, b1)
-		return math.Min(a1, b1) - math.Max(a0, b0), math.Min(a1-a0, b1-b0)
+		a0, a1 = min(a0, a1), max(a0, a1)
+		b0, b1 = min(b0, b1), max(b0, b1)
+		return min(a1, b1) - max(a0, b0), min(a1-a0, b1-b0)
 	}
 	covers := func(over, shorter float64) bool { return shorter > eps && over >= shorter/2 }
 	na, nb := len(a.pts), len(b.pts)
@@ -318,39 +314,58 @@ func clipConvex(pts []point, window []point) []point {
 	return out
 }
 
+// pieces collects what clipping leaves of a line: the parts of its
+// segments that survive, joined into a piece for as long as each starts
+// where the one before it ended.
+type pieces[P point | tpoint] struct {
+	out [][]P
+	cur []P
+}
+
+// add takes the part from a to b of the line's next segment. cutShort
+// says the part ends before the segment does: the piece ends with it.
+func (c *pieces[P]) add(a, b P, cutShort bool) {
+	if len(c.cur) == 0 || c.cur[len(c.cur)-1] != a {
+		c.gap()
+		c.cur = []P{a}
+	}
+	c.cur = append(c.cur, b)
+	if cutShort {
+		c.gap()
+	}
+}
+
+// gap ends the piece being collected, for a segment of which nothing
+// survives; a piece is at least one part.
+func (c *pieces[P]) gap() {
+	if len(c.cur) > 1 {
+		c.out = append(c.out, c.cur)
+	}
+	c.cur = nil
+}
+
+// done is the pieces collected.
+func (c *pieces[P]) done() [][]P {
+	c.gap()
+	return c.out
+}
+
 // clipLineRect cuts a line in tile units to the square [0, size]², which
 // may leave several pieces.
 func clipLineRect(pts []tpoint, size float64) [][]tpoint {
-	var out [][]tpoint
-	var cur []tpoint
+	var kept pieces[tpoint]
 	for i := 0; i+1 < len(pts); i++ {
 		a, b := pts[i], pts[i+1]
 		t0, t1, ok := liangBarsky(a, b, size)
 		if !ok {
-			if len(cur) > 1 {
-				out = append(out, cur)
-			}
-			cur = nil
+			kept.gap()
 			continue
 		}
 		pa := tpoint{a.x + (b.x-a.x)*t0, a.y + (b.y-a.y)*t0}
 		pb := tpoint{a.x + (b.x-a.x)*t1, a.y + (b.y-a.y)*t1}
-		if len(cur) == 0 || cur[len(cur)-1] != pa {
-			if len(cur) > 1 {
-				out = append(out, cur)
-			}
-			cur = []tpoint{pa}
-		}
-		cur = append(cur, pb)
-		if t1 < 1 {
-			out = append(out, cur)
-			cur = nil
-		}
+		kept.add(pa, pb, t1 < 1)
 	}
-	if len(cur) > 1 {
-		out = append(out, cur)
-	}
-	return out
+	return kept.done()
 }
 
 func liangBarsky(a, b tpoint, size float64) (t0, t1 float64, ok bool) {
@@ -369,12 +384,12 @@ func liangBarsky(a, b tpoint, size float64) (t0, t1 float64, ok bool) {
 			if r > t1 {
 				return 0, 0, false
 			}
-			t0 = math.Max(t0, r)
+			t0 = max(t0, r)
 		} else {
 			if r < t0 {
 				return 0, 0, false
 			}
-			t1 = math.Min(t1, r)
+			t1 = min(t1, r)
 		}
 	}
 	return t0, t1, t0 < t1
@@ -383,8 +398,7 @@ func liangBarsky(a, b tpoint, size float64) (t0, t1 float64, ok bool) {
 // clipLineCircle cuts a line in metres to the circle of the given radius
 // around the pin.
 func clipLineCircle(pts []point, radius float64) [][]point {
-	var out [][]point
-	var cur []point
+	var kept pieces[point]
 	r2 := radius * radius
 	for i := 0; i+1 < len(pts); i++ {
 		a, b := pts[i], pts[i+1]
@@ -392,45 +406,25 @@ func clipLineCircle(pts []point, radius float64) [][]point {
 		A := dx*dx + dy*dy
 		B := 2 * (a.x*dx + a.y*dy)
 		C := a.x*a.x + a.y*a.y - r2
-		t0, t1 := 0.0, 1.0
 		if A == 0 {
 			continue
 		}
 		disc := B*B - 4*A*C
 		if disc <= 0 {
-			if len(cur) > 1 {
-				out = append(out, cur)
-			}
-			cur = nil
+			kept.gap()
 			continue
 		}
 		s := math.Sqrt(disc)
-		t0, t1 = math.Max(t0, (-B-s)/(2*A)), math.Min(t1, (-B+s)/(2*A))
+		t0, t1 := max(0, (-B-s)/(2*A)), min(1, (-B+s)/(2*A))
 		if t0 >= t1 {
-			if len(cur) > 1 {
-				out = append(out, cur)
-			}
-			cur = nil
+			kept.gap()
 			continue
 		}
 		pa := point{a.x + dx*t0, a.y + dy*t0}
 		pb := point{a.x + dx*t1, a.y + dy*t1}
-		if len(cur) == 0 || cur[len(cur)-1] != pa {
-			if len(cur) > 1 {
-				out = append(out, cur)
-			}
-			cur = []point{pa}
-		}
-		cur = append(cur, pb)
-		if t1 < 1 {
-			out = append(out, cur)
-			cur = nil
-		}
+		kept.add(pa, pb, t1 < 1)
 	}
-	if len(cur) > 1 {
-		out = append(out, cur)
-	}
-	return out
+	return kept.done()
 }
 
 // discPolygon is the drawn disc as a counter-clockwise polygon.
