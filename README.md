@@ -88,7 +88,7 @@ go test ./...
 go run ./cmd/birdseye sheet -serve :8099          # the fixtures, light or dark with the system
 go run ./cmd/birdseye sheet -tiles dist/croatia-z14.pmtiles -serve :8099
 scripts/build-tiles.sh                             # dist/croatia-z14.pmtiles
-BIRDSEYE_PMTILES=dist/croatia-z14.pmtiles go test ./pmtiles   # the reader against Planetiler's archive
+BIRDSEYE_PMTILES=$PWD/dist/croatia-z14.pmtiles go test ./pmtiles   # the reader against Planetiler's archive (an absolute path: the test runs in pmtiles/)
 ```
 
 A change to what the same tiles and pin draw bumps `StyleVersion`. The

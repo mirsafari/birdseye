@@ -14,7 +14,8 @@ import (
 )
 
 // TestPlanetilerArchiveDrawsWhatTheFixturesDraw reads an archive Planetiler
-// wrote (BIRDSEYE_PMTILES, a Croatia archive; the test skips without it),
+// wrote (BIRDSEYE_PMTILES, an absolute path to a Croatia archive, since the
+// test runs in this directory; it skips without one),
 // so the reader is checked against the format's own writer, not this
 // package's idea of it: every fixture tile is in the archive and every
 // place draws a picture from it, as the release checks its archive. With

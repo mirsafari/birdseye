@@ -23,7 +23,7 @@ jobs:
       - name: Build the Croatia archive
         run: scripts/build-tiles.sh croatia dist
       - name: Check the archive draws what the fixtures draw
-        run: BIRDSEYE_PMTILES=dist/croatia-z14.pmtiles go test ./pmtiles -run Planetiler -v
+        run: BIRDSEYE_PMTILES="$PWD/dist/croatia-z14.pmtiles" go test ./pmtiles -run Planetiler -v # go test runs in the package's directory
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
