@@ -3,7 +3,9 @@ package pmtiles_test
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"testing"
 
@@ -42,13 +44,16 @@ func TestPlanetilerArchiveDrawsWhatTheFixturesDraw(t *testing.T) {
 	same, differ := 0, 0
 	for _, p := range birdseyetest.Places {
 		for _, tz := range birdseye.TilesFor(p.Pin) {
-			want, _ := fixtures.Tile(tz[0], tz[1], tz[2])
-			if want == nil {
+			want, err := fixtures.Tile(t.Context(), tz[0], tz[1], tz[2])
+			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
-			got, err := archive.Tile(tz[0], tz[1], tz[2])
-			if err != nil || got == nil {
-				t.Fatalf("tile %v: %v, %d bytes", tz, err, len(got))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := archive.Tile(t.Context(), tz[0], tz[1], tz[2])
+			if err != nil {
+				t.Fatalf("tile %v: %v", tz, err)
 			}
 			if bytes.Equal(gunzip(t, got), gunzip(t, want)) {
 				same++
@@ -58,12 +63,12 @@ func TestPlanetilerArchiveDrawsWhatTheFixturesDraw(t *testing.T) {
 		}
 		// Every place is drawn, the sparse one too, so each has bytes to
 		// compare.
-		a, errA := birdseye.RenderWith(archive, p.Pin, birdseye.Options{DrawSparse: true})
+		a, errA := birdseye.RenderWith(t.Context(), archive, p.Pin, birdseye.Options{DrawSparse: true})
 		if errA != nil || len(a.SVG) == 0 {
 			t.Errorf("%s: %d bytes, %v", p.Name, len(a.SVG), errA)
 		}
 		if exact {
-			b, errB := birdseye.RenderWith(fixtures, p.Pin, birdseye.Options{DrawSparse: true})
+			b, errB := birdseye.RenderWith(t.Context(), fixtures, p.Pin, birdseye.Options{DrawSparse: true})
 			if errB != nil || !bytes.Equal(a.SVG, b.SVG) {
 				t.Errorf("%s: the archive draws %d bytes, the fixtures %d (%v)", p.Name, len(a.SVG), len(b.SVG), errB)
 			}

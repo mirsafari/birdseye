@@ -3,8 +3,10 @@ package pmtiles
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/binary"
 	"errors"
+	"io/fs"
 	"testing"
 )
 
@@ -131,21 +133,44 @@ func TestReaderFollowsLeavesRunsAndContiguousOffsets(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := zoom2()
-	want := map[uint64]string{5: "aaa", 6: "bbb", 7: "bbb", 8: "", 9: "cc", 10: ""}
+	want := map[uint64]string{5: "aaa", 6: "bbb", 7: "bbb", 9: "cc"}
 	for id, data := range want {
 		xy := at[id]
-		got, err := r.Tile(2, xy[0], xy[1])
+		got, err := r.Tile(t.Context(), 2, xy[0], xy[1])
 		if err != nil || string(got) != data {
 			t.Errorf("tile id %d = %q, %v, want %q", id, got, err, data)
 		}
 	}
-	for _, c := range [][3]int{{0, 0, 0}, {2, 4, 0}, {2, -1, 0}, {32, 0, 0}} {
-		if got, err := r.Tile(c[0], c[1], c[2]); got != nil || err != nil {
-			t.Errorf("tile %v = %q, %v, want nothing", c, got, err)
+	// A tile the archive does not hold is fs.ErrNotExist: between two
+	// entries (8), past the last (10), at another zoom, or off the grid.
+	missing := [][3]int{{2, at[8][0], at[8][1]}, {2, at[10][0], at[10][1]}, {0, 0, 0}, {2, 4, 0}, {2, -1, 0}, {32, 0, 0}}
+	for _, c := range missing {
+		if got, err := r.Tile(t.Context(), c[0], c[1], c[2]); got != nil || !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("tile %v = %q, %v, want fs.ErrNotExist", c, got, err)
 		}
 	}
 	if len(r.leaves) != 2 {
 		t.Errorf("leaves kept = %d, want 2", len(r.leaves))
+	}
+	// A context that is done reads nothing, and says so in its own word.
+	done, cancel := context.WithCancel(t.Context())
+	cancel()
+	if got, err := r.Tile(done, 2, at[5][0], at[5][1]); got != nil || !errors.Is(err, context.Canceled) {
+		t.Errorf("a tile read with a context already done = %q, %v", got, err)
+	}
+}
+
+// TestAnEntryOfNoBytesIsATile: an entry of length zero is a tile the
+// archive holds, with nothing in it, not a missing one.
+func TestAnEntryOfNoBytesIsATile(t *testing.T) {
+	a := archive{root: []entry{{tileID: 5, offset: 0, length: 0, runLength: 1}}, data: []byte{}, tiles: CompressionNone}
+	r, err := New(bytes.NewReader(a.bytes(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	xy := zoom2()[5]
+	if got, err := r.Tile(t.Context(), 2, xy[0], xy[1]); err != nil || len(got) != 0 {
+		t.Errorf("an entry of no bytes = %q, %v, want no bytes and no error", got, err)
 	}
 }
 

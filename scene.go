@@ -1,7 +1,10 @@
 package birdseye
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 )
 
@@ -97,8 +100,10 @@ type scene struct {
 
 // loadScene reads the tiles that cover a square of half-size reach around
 // the pin, and how many of them exist. A reach that takes more tiles than
-// a picture reads is ErrTooWide.
-func loadScene(src Tiles, pin Pin, reach float64) (scene, int, error) {
+// a picture reads is ErrTooWide. It stops between two tiles, with the
+// context's error, once the context is done, whether or not the source
+// looks at the context itself.
+func loadScene(ctx context.Context, src Tiles, pin Pin, reach float64) (scene, int, error) {
 	var sc scene
 	found := 0
 	fr := newFrame(pin)
@@ -107,12 +112,15 @@ func loadScene(src Tiles, pin Pin, reach float64) (scene, int, error) {
 		return sc, 0, ErrTooWide
 	}
 	for _, id := range ids {
-		data, err := src.Tile(Zoom, id.x, id.y)
+		if err := ctx.Err(); err != nil {
+			return sc, found, err
+		}
+		data, err := src.Tile(ctx, Zoom, id.x, id.y)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return sc, found, fmt.Errorf("birdseye: tile %d/%d/%d: %w", Zoom, id.x, id.y, err)
-		}
-		if data == nil {
-			continue
 		}
 		found++
 		ls, err := decodeTile(data, layers)

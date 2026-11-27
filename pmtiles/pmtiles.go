@@ -11,16 +11,19 @@
 // A Reader is a birdseye.Tiles and is safe for concurrent use. It keeps
 // the root directory and the leaf directories it has read in memory; tiles
 // are read when asked for, and come back as stored (gzipped for
-// Planetiler's archives, which birdseye reads as they are).
+// Planetiler's archives, which birdseye reads as they are). A tile the
+// archive does not hold is an error that is fs.ErrNotExist.
 package pmtiles
 
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"sort"
 	"sync"
@@ -116,18 +119,23 @@ func New(src io.ReaderAt) (*Reader, error) {
 // Header is the archive's header.
 func (r *Reader) Header() Header { return r.header }
 
-// Tile reads one tile in XYZ numbering; a tile the archive does not hold
-// is nil with no error.
-func (r *Reader) Tile(z, x, y int) ([]byte, error) {
+// Tile reads one tile in XYZ numbering. A tile the archive does not hold
+// (or no archive could: a position off the zoom's grid) is an error that
+// is fs.ErrNotExist. The context is looked at before the archive is read;
+// a read under way is the io.ReaderAt's to finish.
+func (r *Reader) Tile(ctx context.Context, z, x, y int) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if z < 0 || z > 31 || x < 0 || y < 0 || x >= 1<<z || y >= 1<<z {
-		return nil, nil
+		return nil, notExist(z, x, y)
 	}
 	id := TileID(uint8(z), uint32(x), uint32(y))
 	dir := r.root
 	for range maxDepth {
 		e, ok := find(dir, id)
 		if !ok {
-			return nil, nil
+			return nil, notExist(z, x, y)
 		}
 		if e.runLength > 0 {
 			data, err := r.read(r.header.DataOffset+e.offset, uint64(e.length))
@@ -142,6 +150,11 @@ func (r *Reader) Tile(z, x, y int) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("pmtiles: tile %d/%d/%d: directories nested deeper than %d", z, x, y, maxDepth)
+}
+
+// notExist is the error for a tile the archive does not hold.
+func notExist(z, x, y int) error {
+	return fmt.Errorf("pmtiles: tile %d/%d/%d: %w", z, x, y, fs.ErrNotExist)
 }
 
 // leaf is a leaf directory, read once.

@@ -2,6 +2,7 @@ package birdseye
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"math"
 	"slices"
@@ -64,14 +65,16 @@ type Picture struct {
 }
 
 // Render draws the picture around a pin. With an error there is no
-// picture: ErrNoTiles and ErrTooSparse are places without one, anything
-// else a tile that could not be read.
-func Render(tiles Tiles, pin Pin) (Picture, error) {
-	return RenderWith(tiles, pin, Options{})
+// picture: ErrNoTiles and ErrTooSparse are places without one, the
+// context's error a drawing given up (between two tiles, or before the
+// picture is drawn from them), anything else a tile that could not be
+// read.
+func Render(ctx context.Context, tiles Tiles, pin Pin) (Picture, error) {
+	return RenderWith(ctx, tiles, pin, Options{})
 }
 
 // RenderWith draws the picture with options.
-func RenderWith(tiles Tiles, pin Pin, opts Options) (Picture, error) {
+func RenderWith(ctx context.Context, tiles Tiles, pin Pin, opts Options) (Picture, error) {
 	if !pin.onMap() {
 		return Picture{}, ErrNoTiles
 	}
@@ -80,7 +83,7 @@ func RenderWith(tiles Tiles, pin Pin, opts Options) (Picture, error) {
 	if radius > 0 {
 		reach = radius + reachMargin
 	}
-	sc, found, err := loadScene(tiles, pin, reach)
+	sc, found, err := loadScene(ctx, tiles, pin, reach)
 	if err != nil {
 		return Picture{}, err
 	}
@@ -89,6 +92,9 @@ func RenderWith(tiles Tiles, pin Pin, opts Options) (Picture, error) {
 	}
 	if !(radius > 0) { // zero, negative or not a number
 		radius = placeRadius(sc.prisms)
+	}
+	if err := ctx.Err(); err != nil {
+		return Picture{}, err
 	}
 	pic := draw(sc, radius)
 	if pic.Buildings < MinBuildings && !opts.DrawSparse {

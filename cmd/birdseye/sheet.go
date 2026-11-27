@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"html"
@@ -47,7 +48,7 @@ func sheet(args []string) error {
 			radius float64
 		}{{p.Name + ".svg", 0}, {fmt.Sprintf("%s-%.0f.svg", p.Name, *beside), *beside}} {
 			start := time.Now()
-			pic, err := birdseye.RenderWith(src, p.Pin, birdseye.Options{Radius: v.radius, DrawSparse: true})
+			pic, err := birdseye.RenderWith(context.Background(), src, p.Pin, birdseye.Options{Radius: v.radius, DrawSparse: true})
 			if err != nil {
 				return fmt.Errorf("%s: %w", p.Name, err)
 			}

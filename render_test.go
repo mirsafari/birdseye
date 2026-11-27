@@ -3,8 +3,11 @@ package birdseye
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"regexp"
@@ -12,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fixtures and places are birdseyetest's, read from its directory: these
@@ -130,7 +134,7 @@ func TestDecodeTileRefusesTruncatedBytes(t *testing.T) {
 
 func TestDecodeFixtureTile(t *testing.T) {
 	id := tilesAround(newFrame(places[2].Pin), 1)[0] // Varaždin's centre
-	data, err := fixtures.Tile(Zoom, id.x, id.y)
+	data, err := fixtures.Tile(t.Context(), Zoom, id.x, id.y)
 	if err != nil || data == nil {
 		t.Fatalf("fixture %v: %v", id, err)
 	}
@@ -147,10 +151,77 @@ func TestDecodeFixtureTile(t *testing.T) {
 	}
 }
 
-func TestMissingTileIsNil(t *testing.T) {
-	data, err := fixtures.Tile(Zoom, 0, 0)
-	if data != nil || err != nil {
-		t.Fatalf("missing tile = %v, %v", data, err)
+// TestAMissingTileIsNotExist: a tile a source does not hold is the file
+// system's fs.ErrNotExist, and a pin with none of its tiles is ErrNoTiles.
+func TestAMissingTileIsNotExist(t *testing.T) {
+	data, err := fixtures.Tile(t.Context(), Zoom, 0, 0)
+	if data != nil || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing tile = %v, %v, want fs.ErrNotExist", data, err)
+	}
+	asked := 0
+	none := tilesFunc(func(context.Context, int, int, int) ([]byte, error) {
+		asked++
+		return nil, fmt.Errorf("no such tile: %w", fs.ErrNotExist)
+	})
+	if _, err := Render(t.Context(), none, places[0].Pin); !errors.Is(err, ErrNoTiles) || asked == 0 {
+		t.Errorf("a source without the pin's tiles: %v after %d tiles, want ErrNoTiles", err, asked)
+	}
+}
+
+// TestATileOfNoBytesIsATile: bytes with no error are a tile, also when
+// there are none of them (an archive entry of length zero), so the pin is
+// covered and has too few buildings, not no tiles. Nil and empty are the
+// same: a source cannot say "missing" by which of the two it returns.
+func TestATileOfNoBytesIsATile(t *testing.T) {
+	for name, data := range map[string][]byte{"nil": nil, "empty": {}} {
+		blank := tilesFunc(func(context.Context, int, int, int) ([]byte, error) { return data, nil })
+		if _, err := Render(t.Context(), blank, places[0].Pin); !errors.Is(err, ErrTooSparse) {
+			t.Errorf("%s tiles with no error: %v, want ErrTooSparse", name, err)
+		}
+	}
+}
+
+// TestADrawingStopsWhenItsContextDoes: a context that is done reads
+// nothing, one that ends while the tiles are read stops before the next
+// tile, whether or not the source looks at it, and the error is the
+// context's.
+func TestADrawingStopsWhenItsContextDoes(t *testing.T) {
+	pin := places[1].Pin // Zagreb: more than one tile
+	if n := len(TilesFor(pin)); n < 2 {
+		t.Fatalf("the place reads %d tiles: the test needs two", n)
+	}
+	done, cancel := context.WithCancel(t.Context())
+	cancel()
+	asked := 0
+	counting := tilesFunc(func(ctx context.Context, z, x, y int) ([]byte, error) {
+		asked++
+		return fixtures.Tile(context.Background(), z, x, y) // a source that ignores its context
+	})
+	if _, err := Render(done, counting, pin); !errors.Is(err, context.Canceled) || asked != 0 {
+		t.Errorf("a context already done: %v after %d tiles, want context.Canceled and none", err, asked)
+	}
+	if _, err := fixtures.Tile(done, Zoom, 0, 0); !errors.Is(err, context.Canceled) {
+		t.Errorf("a tile read with a context already done: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	asked = 0
+	stopping := tilesFunc(func(_ context.Context, z, x, y int) ([]byte, error) {
+		asked++
+		cancel() // the request went away while the first tile was read
+		return fixtures.Tile(context.Background(), z, x, y)
+	})
+	pic, err := Render(ctx, stopping, pin)
+	if !errors.Is(err, context.Canceled) || asked != 1 || pic.SVG != nil {
+		t.Errorf("a context done after the first tile: %v after %d tiles with %d bytes, want context.Canceled, one and none", err, asked, len(pic.SVG))
+	}
+
+	// A deadline is the same, in its own word.
+	late, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, err := Render(late, fixtures, pin); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a deadline already past: %v", err)
 	}
 }
 
@@ -340,9 +411,12 @@ func TestARingInsideItsTileIsWhatClippingWouldLeave(t *testing.T) {
 				continue
 			}
 			seen[id] = true
-			data, err := fixtures.Tile(id[0], id[1], id[2])
-			if err != nil || data == nil {
+			data, err := fixtures.Tile(t.Context(), id[0], id[1], id[2])
+			if errors.Is(err, fs.ErrNotExist) {
 				continue
+			}
+			if err != nil {
+				t.Fatal(err)
 			}
 			ls, err := decodeTile(data, layers)
 			if err != nil {
@@ -442,7 +516,7 @@ func TestEveryPlaceRendersInOrder(t *testing.T) {
 	}
 	for _, p := range places {
 		// Drawn whatever its density, so the sparse place is counted too.
-		pic, err := RenderWith(fixtures, p.Pin, Options{DrawSparse: true})
+		pic, err := RenderWith(t.Context(), fixtures, p.Pin, Options{DrawSparse: true})
 		if err != nil {
 			t.Fatalf("%s: %v", p.Name, err)
 		}
@@ -469,11 +543,11 @@ func TestEveryPlaceRendersInOrder(t *testing.T) {
 
 func TestTheSameInputDrawsTheSameBytes(t *testing.T) {
 	pin := places[0].Pin
-	a, err := Render(fixtures, pin)
+	a, err := Render(t.Context(), fixtures, pin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Render(fixtures, pin)
+	b, err := Render(t.Context(), fixtures, pin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,28 +561,28 @@ func TestTheSameInputDrawsTheSameBytes(t *testing.T) {
 // rather than a few sheds; a tool that wants to see them says so.
 func TestASparsePlaceHasNoPictureUnlessAskedFor(t *testing.T) {
 	jankomir := places[len(places)-1].Pin
-	pic, err := Render(fixtures, jankomir)
+	pic, err := Render(t.Context(), fixtures, jankomir)
 	if !errors.Is(err, ErrTooSparse) {
 		t.Fatalf("Jankomir: %v, want ErrTooSparse", err)
 	}
 	if pic.SVG != nil || pic.Buildings != 0 || pic.Radius != 0 || pic.Faces != 0 {
 		t.Fatalf("a picture came with the error: %d bytes, %+v", len(pic.SVG), pic)
 	}
-	drawn, err := RenderWith(fixtures, jankomir, Options{DrawSparse: true})
+	drawn, err := RenderWith(t.Context(), fixtures, jankomir, Options{DrawSparse: true})
 	if err != nil || len(drawn.SVG) == 0 || drawn.Buildings == 0 || drawn.Buildings >= MinBuildings {
 		t.Fatalf("asked for: %d bytes, %d buildings, %v", len(drawn.SVG), drawn.Buildings, err)
 	}
 	// It changes nothing for a place that has its picture.
 	split := places[0].Pin
-	a, errA := Render(fixtures, split)
-	b, errB := RenderWith(fixtures, split, Options{DrawSparse: true})
+	a, errA := Render(t.Context(), fixtures, split)
+	b, errB := RenderWith(t.Context(), fixtures, split, Options{DrawSparse: true})
 	if errA != nil || errB != nil || !bytes.Equal(a.SVG, b.SVG) {
 		t.Fatalf("Split with and without DrawSparse: %v, %v, the same bytes %v", errA, errB, bytes.Equal(a.SVG, b.SVG))
 	}
 }
 
 func TestAPinOutsideTheTilesHasNoPicture(t *testing.T) {
-	if _, err := Render(fixtures, Pin{48.2082, 16.3738}); !errors.Is(err, ErrNoTiles) {
+	if _, err := Render(t.Context(), fixtures, Pin{48.2082, 16.3738}); !errors.Is(err, ErrNoTiles) {
 		t.Fatalf("Vienna: %v", err)
 	}
 }
@@ -516,7 +590,7 @@ func TestAPinOutsideTheTilesHasNoPicture(t *testing.T) {
 func TestTownsAreDrawnCloserThanVillages(t *testing.T) {
 	radius := map[string]float64{}
 	for _, p := range places {
-		pic, err := RenderWith(fixtures, p.Pin, Options{DrawSparse: true})
+		pic, err := RenderWith(t.Context(), fixtures, p.Pin, Options{DrawSparse: true})
 		if err != nil {
 			t.Fatalf("%s: %v", p.Name, err)
 		}
@@ -540,7 +614,7 @@ func TestTownsAreDrawnCloserThanVillages(t *testing.T) {
 		}
 	}
 
-	fixed, err := RenderWith(fixtures, places[0].Pin, Options{Radius: 360})
+	fixed, err := RenderWith(t.Context(), fixtures, places[0].Pin, Options{Radius: 360})
 	if err != nil || fixed.Radius != 360 {
 		t.Fatalf("a fixed radius: %.0f, %v", fixed.Radius, err)
 	}
@@ -559,21 +633,21 @@ func TestThePinIsWhereTheCameraAims(t *testing.T) {
 }
 
 // tilesFunc is a tile source in a function.
-type tilesFunc func(z, x, y int) ([]byte, error)
+type tilesFunc func(ctx context.Context, z, x, y int) ([]byte, error)
 
-func (f tilesFunc) Tile(z, x, y int) ([]byte, error) { return f(z, x, y) }
+func (f tilesFunc) Tile(ctx context.Context, z, x, y int) ([]byte, error) { return f(ctx, z, x, y) }
 
 // TestAPinOffTheMapHasNoPictureAndReadsNoTiles: towards a pole a metre
 // spans ever more of the world, and the tiles around a pin there were
 // listed without end (7 GB of them at 89.999°) before one was read.
 func TestAPinOffTheMapHasNoPictureAndReadsNoTiles(t *testing.T) {
 	read := 0
-	counting := tilesFunc(func(z, x, y int) ([]byte, error) { read++; return nil, nil })
+	counting := tilesFunc(func(context.Context, int, int, int) ([]byte, error) { read++; return nil, fs.ErrNotExist })
 	for _, pin := range []Pin{
 		{89.999, 16}, {90, 16}, {-90, 16}, {85.06, 16}, {45, 181}, {45, -181},
 		{math.NaN(), 16}, {45, math.NaN()}, {math.Inf(1), 16}, {45, math.Inf(-1)},
 	} {
-		if _, err := Render(counting, pin); !errors.Is(err, ErrNoTiles) {
+		if _, err := Render(t.Context(), counting, pin); !errors.Is(err, ErrNoTiles) {
 			t.Errorf("%v: %v, want ErrNoTiles", pin, err)
 		}
 		if got := TilesFor(pin); got != nil {
@@ -587,7 +661,7 @@ func TestAPinOffTheMapHasNoPictureAndReadsNoTiles(t *testing.T) {
 	if n := len(TilesFor(Pin{maxLatitude, 16})); n == 0 || n > 36 {
 		t.Errorf("a pin at Web Mercator's edge lists %d tiles", n)
 	}
-	if _, err := Render(counting, Pin{maxLatitude, 16}); !errors.Is(err, ErrNoTiles) || read == 0 {
+	if _, err := Render(t.Context(), counting, Pin{maxLatitude, 16}); !errors.Is(err, ErrNoTiles) || read == 0 {
 		t.Errorf("a pin at Web Mercator's edge: %v after %d tiles", err, read)
 	}
 }
@@ -595,7 +669,7 @@ func TestAPinOffTheMapHasNoPictureAndReadsNoTiles(t *testing.T) {
 func TestARadiusTooWideToReadIsRefused(t *testing.T) {
 	pin := places[0].Pin
 	for _, radius := range []float64{1e6, 1e12, math.Inf(1)} {
-		if _, err := RenderWith(fixtures, pin, Options{Radius: radius}); !errors.Is(err, ErrTooWide) {
+		if _, err := RenderWith(t.Context(), fixtures, pin, Options{Radius: radius}); !errors.Is(err, ErrTooWide) {
 			t.Errorf("radius %v: %v, want ErrTooWide", radius, err)
 		}
 	}
@@ -603,12 +677,12 @@ func TestARadiusTooWideToReadIsRefused(t *testing.T) {
 		t.Errorf("%d tiles listed for a reach of a million kilometres", len(ids))
 	}
 	// A radius that is no number at all is the place's own.
-	own, err := Render(fixtures, pin)
+	own, err := Render(t.Context(), fixtures, pin)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, radius := range []float64{math.NaN(), -5} {
-		pic, err := RenderWith(fixtures, pin, Options{Radius: radius})
+		pic, err := RenderWith(t.Context(), fixtures, pin, Options{Radius: radius})
 		if err != nil || pic.Radius != own.Radius {
 			t.Errorf("radius %v: drawn %v m around (%v), want the place's %v", radius, pic.Radius, err, own.Radius)
 		}
@@ -810,7 +884,7 @@ func TestDecodeTileRefusesWhatCannotBeDrawn(t *testing.T) {
 func TestWhatIsCutSouthIsBelowTheFrame(t *testing.T) {
 	cut := 0
 	for _, p := range places {
-		sc, _, err := loadScene(fixtures, p.Pin, MaxRadius+reachMargin)
+		sc, _, err := loadScene(t.Context(), fixtures, p.Pin, MaxRadius+reachMargin)
 		if err != nil {
 			t.Fatal(err)
 		}
