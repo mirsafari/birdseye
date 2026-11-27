@@ -32,7 +32,8 @@
 //     map (Options.DrawSparse is for a tool that wants to look at a sparse
 //     place anyway). Any pin may be asked
 //     for: one off the map (towards a pole, or not a number) is
-//     ErrNoTiles, and no picture reads more than a few tiles.
+//     ErrNoTiles, and no picture reads more than a few tiles. Pin.OnMap
+//     is that bound, for an app to hold a pin to when it is entered.
 //
 // # What an app relies on
 //

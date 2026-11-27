@@ -647,6 +647,9 @@ func TestAPinOffTheMapHasNoPictureAndReadsNoTiles(t *testing.T) {
 		{89.999, 16}, {90, 16}, {-90, 16}, {85.06, 16}, {45, 181}, {45, -181},
 		{math.NaN(), 16}, {45, math.NaN()}, {math.Inf(1), 16}, {45, math.Inf(-1)},
 	} {
+		if pin.OnMap() {
+			t.Errorf("%v: OnMap() = true", pin)
+		}
 		if _, err := Render(t.Context(), counting, pin); !errors.Is(err, ErrNoTiles) {
 			t.Errorf("%v: %v, want ErrNoTiles", pin, err)
 		}
@@ -657,11 +660,17 @@ func TestAPinOffTheMapHasNoPictureAndReadsNoTiles(t *testing.T) {
 	if read != 0 {
 		t.Errorf("%d tiles were asked for", read)
 	}
+	// The edges themselves are on the map.
+	for _, pin := range []Pin{{MaxLatitude, 16}, {-MaxLatitude, 16}, {45, 180}, {45, -180}, {0, 0}} {
+		if !pin.OnMap() {
+			t.Errorf("%v: OnMap() = false", pin)
+		}
+	}
 	// The northernmost pin on the map is the widest case: a few tiles.
-	if n := len(TilesFor(Pin{maxLatitude, 16})); n == 0 || n > 36 {
+	if n := len(TilesFor(Pin{MaxLatitude, 16})); n == 0 || n > 36 {
 		t.Errorf("a pin at Web Mercator's edge lists %d tiles", n)
 	}
-	if _, err := Render(t.Context(), counting, Pin{maxLatitude, 16}); !errors.Is(err, ErrNoTiles) || read == 0 {
+	if _, err := Render(t.Context(), counting, Pin{MaxLatitude, 16}); !errors.Is(err, ErrNoTiles) || read == 0 {
 		t.Errorf("a pin at Web Mercator's edge: %v after %d tiles", err, read)
 	}
 }
@@ -689,7 +698,7 @@ func TestARadiusTooWideIsRefused(t *testing.T) {
 	if err != nil || widest.Radius != WidestRadius || read == 0 {
 		t.Errorf("the widest radius: drawn %v m around after %d tiles (%v)", widest.Radius, read, err)
 	}
-	for _, at := range []Pin{pin, {maxLatitude, 16}, {-maxLatitude, 16}, {0, 0}} {
+	for _, at := range []Pin{pin, {MaxLatitude, 16}, {-MaxLatitude, 16}, {0, 0}} {
 		if n := len(tilesAround(newFrame(at), WidestRadius+reachMargin)); n == 0 || n > 144 {
 			t.Errorf("%v: the widest radius lists %d tiles, want some and at most 144", at, n)
 		}

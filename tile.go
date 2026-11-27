@@ -49,7 +49,7 @@ func (t fsTiles) Tile(ctx context.Context, z, x, y int) ([]byte, error) {
 // tile within reach of the widest disc, none for a pin off the map.
 // Cutting fixtures from an archive takes these.
 func TilesFor(pin Pin) [][3]int {
-	if !pin.onMap() {
+	if !pin.OnMap() {
 		return nil
 	}
 	var out [][3]int
@@ -64,14 +64,19 @@ type Pin struct {
 	Lat, Lng float64
 }
 
-// maxLatitude is where Web Mercator's square world ends, north and south.
-const maxLatitude = 85.0511287798066
+// MaxLatitude is where Web Mercator's square world ends, north and south,
+// in degrees: the edge of every tiled map, where a map widget's pin
+// picker ends too.
+const MaxLatitude = 85.0511287798066
 
-// onMap reports whether the pin is a place Web Mercator has tiles for.
-// Towards a pole a metre spans ever more of the world, so a pin there
-// would ask for tiles without end; a pin that is not a number is nowhere.
-func (p Pin) onMap() bool {
-	return math.Abs(p.Lat) <= maxLatitude && math.Abs(p.Lng) <= 180
+// OnMap reports whether the pin is a place Web Mercator has tiles for:
+// within MaxLatitude north and south, within 180° east and west, and a
+// number at all. Render answers ErrNoTiles for any other pin, without
+// reading a tile; an app that takes a pin from outside can hold it to the
+// same bound when it is entered. Towards a pole a metre spans ever more
+// of the world, so a pin there would ask for tiles without end.
+func (p Pin) OnMap() bool {
+	return math.Abs(p.Lat) <= MaxLatitude && math.Abs(p.Lng) <= 180
 }
 
 // tileID names one tile at Zoom.
@@ -129,7 +134,7 @@ func (f frame) fromLocal(ox, oy, unit float64, p point) tpoint {
 
 // maxTiles is the most tiles one picture reads. A pin on the map takes at
 // most 36 at a place's own radius and 144 at WidestRadius (at
-// maxLatitude; 4 and 9 in Croatia), so no radius RenderWith lets through
+// MaxLatitude; 4 and 9 in Croatia), so no radius RenderWith lets through
 // reaches it: it bounds the list itself, whatever asks for it.
 const maxTiles = 256
 
