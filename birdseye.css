@@ -1,0 +1,67 @@
+/* birdseye's default colours (Stylesheet in Go).
+
+   The picture reads 14 colour variables. Here they are derived from four
+   base colours, set on the root for light and dark (following the
+   reader's colour scheme), and the derived colours are worked out on the
+   element of class "birdseye" that holds the picture, so a page can set
+   the base colours on any element above it:
+
+     --birdseye-paper   the page behind the picture (roofs, roads)
+     --birdseye-ink     the text colour (walls and edges mix it in)
+     --birdseye-accent  the brand colour (water, the pinned building)
+     --birdseye-leaf    parks and woods
+
+   A page with its own light/dark switch (a class on <html>, say) sets the
+   14 colours under its own selectors instead, as the light and dark blocks
+   below do. The roof is the lightest face in both, and the walls darken
+   away from the light (south-west). */
+
+:where(:root) {
+  --birdseye-paper: oklch(1 0 0);
+  --birdseye-ink: oklch(0.147 0.004 49.25);
+  --birdseye-accent: oklch(0.52 0.105 223.128);
+  --birdseye-leaf: oklch(0.627 0.194 149.214);
+}
+
+:where(.birdseye) {
+  --birdseye-ground: color-mix(in oklab, var(--birdseye-ink) 5%, var(--birdseye-paper));
+  --birdseye-road: var(--birdseye-paper);
+  --birdseye-green: color-mix(in oklab, var(--birdseye-leaf) 16%, var(--birdseye-paper));
+  --birdseye-water: color-mix(in oklab, var(--birdseye-accent) 20%, var(--birdseye-paper));
+  --birdseye-roof: var(--birdseye-paper);
+  --birdseye-wall-1: color-mix(in oklab, var(--birdseye-ink) 9%, var(--birdseye-paper));
+  --birdseye-wall-2: color-mix(in oklab, var(--birdseye-ink) 16%, var(--birdseye-paper));
+  --birdseye-wall-3: color-mix(in oklab, var(--birdseye-ink) 25%, var(--birdseye-paper));
+  --birdseye-edge: color-mix(in oklab, var(--birdseye-ink) 40%, var(--birdseye-paper));
+  --birdseye-pinned-roof: var(--birdseye-accent);
+  --birdseye-pinned-wall-1: color-mix(in oklab, var(--birdseye-accent) 80%, var(--birdseye-ink));
+  --birdseye-pinned-wall-2: color-mix(in oklab, var(--birdseye-accent) 68%, var(--birdseye-ink));
+  --birdseye-pinned-wall-3: color-mix(in oklab, var(--birdseye-accent) 56%, var(--birdseye-ink));
+  --birdseye-pinned-edge: color-mix(in oklab, var(--birdseye-accent) 50%, var(--birdseye-ink));
+}
+
+@media (prefers-color-scheme: dark) {
+  :where(:root) {
+    --birdseye-paper: oklch(0.216 0.006 56.043);
+    --birdseye-ink: oklch(0.985 0.001 106.423);
+    --birdseye-accent: oklch(0.45 0.085 224.283);
+    --birdseye-leaf: oklch(0.723 0.219 149.579);
+  }
+
+  :where(.birdseye) {
+    --birdseye-ground: color-mix(in oklab, var(--birdseye-ink) 6%, var(--birdseye-paper));
+    --birdseye-road: color-mix(in oklab, var(--birdseye-ink) 13%, var(--birdseye-paper));
+    --birdseye-green: color-mix(in oklab, var(--birdseye-leaf) 16%, var(--birdseye-paper));
+    --birdseye-water: color-mix(in oklab, var(--birdseye-accent) 35%, var(--birdseye-paper));
+    --birdseye-roof: color-mix(in oklab, var(--birdseye-ink) 22%, var(--birdseye-paper));
+    --birdseye-wall-1: color-mix(in oklab, var(--birdseye-ink) 15%, var(--birdseye-paper));
+    --birdseye-wall-2: color-mix(in oklab, var(--birdseye-ink) 9%, var(--birdseye-paper));
+    --birdseye-wall-3: color-mix(in oklab, var(--birdseye-ink) 4%, var(--birdseye-paper));
+    --birdseye-edge: color-mix(in oklab, var(--birdseye-ink) 34%, var(--birdseye-paper));
+    --birdseye-pinned-roof: color-mix(in oklab, var(--birdseye-accent) 80%, var(--birdseye-ink));
+    --birdseye-pinned-wall-1: var(--birdseye-accent);
+    --birdseye-pinned-wall-2: color-mix(in oklab, var(--birdseye-accent) 80%, var(--birdseye-paper));
+    --birdseye-pinned-wall-3: color-mix(in oklab, var(--birdseye-accent) 62%, var(--birdseye-paper));
+    --birdseye-pinned-edge: color-mix(in oklab, var(--birdseye-accent) 40%, var(--birdseye-ink));
+  }
+}

@@ -1,0 +1,176 @@
+package pmtiles
+
+import (
+	"bytes"
+	"compress/gzip"
+	"encoding/binary"
+	"errors"
+	"testing"
+)
+
+// TestTileIDFollowsTheHilbertCurve: the spec's first ids, and every tile
+// of a zoom on its own id after the lower zooms' tiles.
+func TestTileIDFollowsTheHilbertCurve(t *testing.T) {
+	for _, c := range []struct {
+		z    uint8
+		x, y uint32
+		id   uint64
+	}{{0, 0, 0, 0}, {1, 0, 0, 1}, {1, 0, 1, 2}, {1, 1, 1, 3}, {1, 1, 0, 4}, {2, 0, 0, 5}} {
+		if got := TileID(c.z, c.x, c.y); got != c.id {
+			t.Errorf("TileID(%d, %d, %d) = %d, want %d", c.z, c.x, c.y, got, c.id)
+		}
+	}
+	for z := uint8(0); z <= 5; z++ {
+		first := (uint64(1)<<(2*z) - 1) / 3
+		seen := map[uint64]bool{}
+		for x := uint32(0); x < 1<<z; x++ {
+			for y := uint32(0); y < 1<<z; y++ {
+				id := TileID(z, x, y)
+				if id < first || id >= first+1<<(2*z) || seen[id] {
+					t.Fatalf("zoom %d: tile %d/%d has id %d", z, x, y, id)
+				}
+				seen[id] = true
+			}
+		}
+	}
+}
+
+// archive builds a small archive the way the spec lays one out: the
+// header, the root directory, the leaf directories, then the tile data,
+// with directories gzipped.
+type archive struct {
+	root   []entry
+	leaves [][]entry
+	data   []byte
+	tiles  Compression
+}
+
+func (a archive) bytes(t *testing.T) []byte {
+	t.Helper()
+	gz := func(b []byte) []byte {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		_, _ = zw.Write(b)
+		_ = zw.Close()
+		return buf.Bytes()
+	}
+	root := gz(encodeDirectory(a.root))
+	var leaves []byte
+	for _, l := range a.leaves {
+		leaves = append(leaves, gz(encodeDirectory(l))...)
+	}
+	h := make([]byte, headerLength)
+	copy(h, "PMTiles")
+	h[7] = 3
+	put := func(at int, v uint64) { binary.LittleEndian.PutUint64(h[at:], v) }
+	put(8, headerLength)
+	put(16, uint64(len(root)))
+	put(40, headerLength+uint64(len(root)))
+	put(48, uint64(len(leaves)))
+	put(56, headerLength+uint64(len(root)+len(leaves)))
+	put(64, uint64(len(a.data)))
+	h[97] = byte(CompressionGzip)
+	h[98] = byte(a.tiles)
+	h[99] = byte(TileTypeMVT)
+	out := append(h, root...)
+	out = append(out, leaves...)
+	return append(out, a.data...)
+}
+
+func encodeDirectory(es []entry) []byte {
+	b := binary.AppendUvarint(nil, uint64(len(es)))
+	var last uint64
+	for _, e := range es {
+		b = binary.AppendUvarint(b, e.tileID-last)
+		last = e.tileID
+	}
+	for _, e := range es {
+		b = binary.AppendUvarint(b, uint64(e.runLength))
+	}
+	for _, e := range es {
+		b = binary.AppendUvarint(b, uint64(e.length))
+	}
+	for i, e := range es {
+		if i > 0 && e.offset == es[i-1].offset+uint64(es[i-1].length) {
+			b = binary.AppendUvarint(b, 0)
+		} else {
+			b = binary.AppendUvarint(b, e.offset+1)
+		}
+	}
+	return b
+}
+
+// zoom2 is the zoom-2 tile with each id.
+func zoom2() map[uint64][2]int {
+	out := map[uint64][2]int{}
+	for x := range 4 {
+		for y := range 4 {
+			out[TileID(2, uint32(x), uint32(y))] = [2]int{x, y}
+		}
+	}
+	return out
+}
+
+func TestReaderFollowsLeavesRunsAndContiguousOffsets(t *testing.T) {
+	// Tiles 5 ("aaa"), 6 and 7 (one run sharing "bbb") and 9 ("cc", right
+	// after "bbb", so its offset is written as 0) behind two leaves.
+	leaf1 := []entry{{tileID: 5, offset: 0, length: 3, runLength: 1}, {tileID: 6, offset: 3, length: 3, runLength: 2}}
+	leaf2 := []entry{{tileID: 9, offset: 6, length: 2, runLength: 1}}
+	l1 := len(gzipped(t, encodeDirectory(leaf1)))
+	a := archive{
+		root: []entry{
+			{tileID: 5, offset: 0, length: uint32(l1)},
+			{tileID: 9, offset: uint64(l1), length: uint32(len(gzipped(t, encodeDirectory(leaf2))))},
+		},
+		leaves: [][]entry{leaf1, leaf2},
+		data:   []byte("aaabbbcc"),
+		tiles:  CompressionNone,
+	}
+	r, err := New(bytes.NewReader(a.bytes(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := zoom2()
+	want := map[uint64]string{5: "aaa", 6: "bbb", 7: "bbb", 8: "", 9: "cc", 10: ""}
+	for id, data := range want {
+		xy := at[id]
+		got, err := r.Tile(2, xy[0], xy[1])
+		if err != nil || string(got) != data {
+			t.Errorf("tile id %d = %q, %v, want %q", id, got, err, data)
+		}
+	}
+	for _, c := range [][3]int{{0, 0, 0}, {2, 4, 0}, {2, -1, 0}, {32, 0, 0}} {
+		if got, err := r.Tile(c[0], c[1], c[2]); got != nil || err != nil {
+			t.Errorf("tile %v = %q, %v, want nothing", c, got, err)
+		}
+	}
+	if len(r.leaves) != 2 {
+		t.Errorf("leaves kept = %d, want 2", len(r.leaves))
+	}
+}
+
+func gzipped(t *testing.T, b []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write(b)
+	_ = zw.Close()
+	return buf.Bytes()
+}
+
+func TestNewRefusesWhatItCannotRead(t *testing.T) {
+	if _, err := New(bytes.NewReader([]byte("SQLite format 3\x00" + string(make([]byte, 200))))); !errors.Is(err, ErrNotPMTiles) {
+		t.Errorf("an SQLite file: %v", err)
+	}
+	v2 := archive{data: []byte{}, tiles: CompressionGzip}.bytes(t)
+	v2[7] = 2
+	if _, err := New(bytes.NewReader(v2)); !errors.Is(err, ErrNotPMTiles) {
+		t.Errorf("version 2: %v", err)
+	}
+	if _, err := New(bytes.NewReader(archive{data: []byte{}, tiles: CompressionBrotli}.bytes(t))); err == nil {
+		t.Error("brotli tiles were accepted")
+	}
+	if _, err := New(bytes.NewReader([]byte("PMT"))); err == nil {
+		t.Error("a short file was accepted")
+	}
+}

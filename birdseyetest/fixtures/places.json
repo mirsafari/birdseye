@@ -1,0 +1,13 @@
+[
+  {"name": "split-riva", "lat": 43.5081, "lng": 16.4402, "note": "coast, old town; the pin is on a building"},
+  {"name": "zagreb-vukovarska", "lat": 45.7930, "lng": 15.9970, "note": "city blocks, towers"},
+  {"name": "varazdin-centre", "lat": 46.3057, "lng": 16.3378, "note": "old town; the pin is in a square"},
+  {"name": "porec-riva", "lat": 45.2270, "lng": 13.5956, "note": "coast, peninsula"},
+  {"name": "komiza-harbour", "lat": 43.0437, "lng": 16.0886, "note": "island village harbour"},
+  {"name": "rovinj-old-town", "lat": 45.0827, "lng": 13.6312, "note": "the densest case"},
+  {"name": "makarska-riva", "lat": 43.2955, "lng": 17.0170, "note": "coastal town promenade"},
+  {"name": "zelena-laguna-camp", "lat": 45.1960, "lng": 13.5890, "note": "campsite resort"},
+  {"name": "sv-martin-na-muri", "lat": 46.5236, "lng": 16.3636, "note": "rural village"},
+  {"name": "delnice-centre", "lat": 45.4011, "lng": 14.8003, "note": "mountain town"},
+  {"name": "zagreb-jankomir", "lat": 45.8005, "lng": 15.8700, "note": "big-box zone, the sparse case"}
+]

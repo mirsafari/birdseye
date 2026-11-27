@@ -1,0 +1,4 @@
+/dist/
+/sheet/
+*.pmtiles
+*.mbtiles

@@ -1,0 +1,32 @@
+# On a version tag (v1.2.3): test, build the Croatia tile archive with
+# Planetiler, and publish both on the tag's release. Apps download the
+# archive from the release's URL and check it against its .sha256.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./... && go test ./...
+      - name: Build the Croatia archive
+        run: scripts/build-tiles.sh croatia dist
+      - name: Check the archive draws what the fixtures draw
+        run: BIRDSEYE_PMTILES=dist/croatia-z14.pmtiles go test ./pmtiles -run Planetiler -v
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes "croatia-z14.pmtiles: zoom-14 OpenMapTiles-schema tiles built $(date -u +%F) with Planetiler from Geofabrik's Croatia extract. © OpenMapTiles © OpenStreetMap contributors; the archive is made available under the Open Database License (ODbL 1.0)." \
+            dist/croatia-z14.pmtiles dist/croatia-z14.pmtiles.sha256
