@@ -48,6 +48,11 @@ var (
 	// ErrTooSparse is a place with fewer than MinBuildings buildings in
 	// the disc: no picture, unless Options.DrawSparse asks for it.
 	ErrTooSparse = errors.New("birdseye: too few buildings around the pin")
+	// ErrTooComplex is tiles that hold more around the pin than any place
+	// does, past one of the bounds a drawing keeps to so that its time
+	// and memory stay bounded: broken or hostile tiles, never a real map
+	// (the densest place in Croatia uses a seventh of the points allowed).
+	ErrTooComplex = errors.New("birdseye: the tiles hold too much around the pin to draw")
 )
 
 // Options vary a picture; the zero value is the picture as designed.
@@ -75,8 +80,8 @@ type Picture struct {
 // Render draws the picture around a pin. With an error there is no
 // picture: ErrNoTiles and ErrTooSparse are places without one, the
 // context's error a drawing given up (between two tiles, or before the
-// picture is drawn from them), anything else a tile that could not be
-// read.
+// picture is drawn from them), ErrTooComplex tiles past a drawing's
+// bounds, anything else a tile that could not be read.
 func Render(ctx context.Context, tiles Tiles, pin Pin) (Picture, error) {
 	return RenderWith(ctx, tiles, pin, Options{})
 }

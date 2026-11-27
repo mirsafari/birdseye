@@ -107,6 +107,23 @@ type scene struct {
 	prisms  []*prism
 	patches []patch
 	strokes []stroke
+	points  int // decoded from the tiles so far, against maxScenePoints
+}
+
+// maxScenePoints is the most points a drawing decodes from its tiles. The
+// densest drawing in Croatia (central Zagreb at WidestRadius) decodes
+// 147,000; a million keep everything a drawing makes of them (the copies
+// in metres, the walls, the picture) to some tens of megabytes, where a
+// few kilobytes of a hostile tile could otherwise make gigabytes of them.
+const maxScenePoints = 1 << 20
+
+// spend counts the points of a feature that is about to be decoded.
+func (sc *scene) spend(f feature) error {
+	sc.points += f.values / 2
+	if sc.points > maxScenePoints {
+		return fmt.Errorf("%w: more than %d points", ErrTooComplex, maxScenePoints)
+	}
+	return nil
 }
 
 // loadScene reads the tiles that cover a square of half-size reach around
@@ -317,6 +334,9 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 			if f.kind != geomPolygon || f.flag("hide_3d") || !t.near(f) {
 				continue
 			}
+			if err := sc.spend(f); err != nil {
+				return err
+			}
 			err := t.eachPolygon(f, func(poly [][]tpoint) {
 				if p, ok := t.prism(f, poly); ok {
 					sc.prisms = append(sc.prisms, p)
@@ -342,6 +362,9 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 			kind, ok := patchOf(name, f)
 			if !ok {
 				continue
+			}
+			if err := sc.spend(f); err != nil {
+				return err
 			}
 			err := t.eachPolygon(f, func(poly [][]tpoint) {
 				var rings [][]point
@@ -378,6 +401,9 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 			kind, width, ok := strokeOf(name, f)
 			if !ok {
 				continue
+			}
+			if err := sc.spend(f); err != nil {
+				return err
 			}
 			var err error
 			buf, err = f.eachPath(buf, func(p []tpoint) {

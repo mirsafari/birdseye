@@ -231,14 +231,19 @@ func (f feature) bounds() (lo, hi tpoint, ok bool) {
 // the geometry's parameters and sint values are written.
 func zigzag(v uint64) int64 { return int64(v>>1) ^ -int64(v&1) }
 
-// maxTileBytes bounds a tile once unpacked (a zoom-14 tile of a city is a
-// megabyte or two), so a few kilobytes of gzip cannot ask for gigabytes.
-const maxTileBytes = 64 << 20
+// maxTileBytes bounds a tile as it is stored and once unpacked: the
+// densest tile of Croatia's archive unpacks to 160 KB, so a few kilobytes
+// of gzip cannot ask for gigabytes. What a tile's bytes can then make the
+// drawing hold is bounded by maxScenePoints.
+const maxTileBytes = 8 << 20
 
 // gunzip unpacks data when it is gzipped and refuses more than limit
-// bytes of it.
+// bytes of it, packed or not.
 func gunzip(data []byte, limit int) ([]byte, error) {
 	if !unzip.Gzipped(data) {
+		if len(data) > limit {
+			return nil, fmt.Errorf("birdseye: tile of %d bytes, more than %d", len(data), limit)
+		}
 		return data, nil
 	}
 	out, err := unzip.Limited(data, int64(limit))

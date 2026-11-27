@@ -13,10 +13,12 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -1067,8 +1069,71 @@ func TestGunzipRefusesATileThatUnpacksTooLarge(t *testing.T) {
 		t.Fatal("a tile over the limit was unpacked")
 	}
 	plain := []byte("not gzipped")
-	if out, err := gunzip(plain, 4); err != nil || !bytes.Equal(out, plain) {
+	if out, err := gunzip(plain, len(plain)); err != nil || !bytes.Equal(out, plain) {
 		t.Fatalf("a tile that is not gzipped: %q, %v", out, err)
+	}
+	if _, err := gunzip(plain, len(plain)-1); err == nil {
+		t.Fatal("a tile over the limit that is not gzipped was taken")
+	}
+}
+
+// TestATileFileLargerThanAnyTileIsNotRead: a directory's tile file is
+// refused for its size before it is read.
+func TestATileFileLargerThanAnyTileIsNotRead(t *testing.T) {
+	src := FSTiles(fstest.MapFS{
+		"14-1-1.pbf": {Data: make([]byte, maxTileBytes+1)},
+		"14-1-2.pbf": {Data: []byte("tile")},
+	})
+	if _, err := src.Tile(t.Context(), 14, 1, 1); err == nil || errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a file of %d bytes: %v, want refused", maxTileBytes+1, err)
+	}
+	if data, err := src.Tile(t.Context(), 14, 1, 2); err != nil || string(data) != "tile" {
+		t.Errorf("a small file: %q, %v", data, err)
+	}
+	if _, err := src.Tile(t.Context(), 14, 9, 9); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a missing file: %v", err)
+	}
+}
+
+// TestAHostileTileIsRefusedCheaply: a tile of a few kilobytes of gzip can
+// hold a footprint that laps a one-unit square a million times. Drawing
+// it made 920 MB of copies and an 84 MB picture; the points a drawing
+// decodes are bounded, so it is refused before its points are decoded.
+func TestAHostileTileIsRefusedCheaply(t *testing.T) {
+	const laps = maxScenePoints/4 + 1
+	geometry := make([]uint32, 0, 3+1+laps*8+1)
+	geometry = append(geometry, 1|1<<3, zz(2000), zz(2000), 2|uint32(laps*4)<<3)
+	for range laps {
+		geometry = append(geometry, zz(1), 0, 0, zz(1), zz(-1), 0, 0, zz(-1))
+	}
+	geometry = append(geometry, 7|1<<3)
+	layerBytes := pb{}.uint(15, 2).bytes(1, []byte("building")).uint(5, 4096).
+		bytes(2, pb{}.uint(3, uint64(geomPolygon)).packed(4, geometry...))
+	var packed bytes.Buffer
+	zw := gzip.NewWriter(&packed)
+	_, _ = zw.Write(pb{}.bytes(3, layerBytes))
+	_ = zw.Close()
+	tile := packed.Bytes()
+	// The pin in the middle of the tile, on the footprint.
+	n := float64(int(1) << Zoom)
+	wx, wy := (8900+2000.0/4096)/n, (5900+2000.0/4096)/n
+	pin := Pin{Lat: math.Atan(math.Sinh(math.Pi*(1-2*wy))) * 180 / math.Pi, Lng: wx*360 - 180}
+	src := tilesFunc(func(_ context.Context, z, x, y int) ([]byte, error) {
+		if x == 8900 && y == 5900 {
+			return tile, nil
+		}
+		return nil, fs.ErrNotExist
+	})
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := RenderWith(t.Context(), src, pin, Options{DrawSparse: true})
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, ErrTooComplex) {
+		t.Fatalf("a tile of %d bytes lapping a square %d times: %v, want ErrTooComplex", len(tile), laps, err)
+	}
+	if mb := float64(after.TotalAlloc-before.TotalAlloc) / 1e6; mb > 32 {
+		t.Errorf("refusing it allocated %.0f MB", mb)
 	}
 }
 
