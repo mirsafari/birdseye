@@ -746,10 +746,161 @@ func edgeScene(t *testing.T) scene {
 		t.Fatal(err)
 	}
 	joinParts(sc.prisms)
+	evenHeights(sc.prisms)
 	if len(sc.prisms) != 6 {
 		t.Fatalf("%d prisms, want each building's two halves", len(sc.prisms))
 	}
 	return sc
+}
+
+// rect is a polygon feature's geometry like square's, w by h.
+func rect(x, y, w, h int32) []uint32 {
+	return []uint32{
+		1 | 1<<3, zz(x), zz(y),
+		2 | 3<<3, zz(w), 0, 0, zz(h), zz(-w), 0,
+		7 | 1<<3,
+	}
+}
+
+// TestTheSidesOfACutBuildingAreOneHeight: a hall without a height in the
+// map runs 300 tile units into the west tile and 40 into the east one.
+// Each tile carries its own side and 64 units of the other (its buffer)
+// and guesses a height from that: 11 m west of the edge, 9.5 m east of
+// it, a step in the roof with no wall under it. The hall is one height,
+// guessed from its whole footprint.
+func TestTheSidesOfACutBuildingAreOneHeight(t *testing.T) {
+	const extent, buffer = 4096, 64
+	n := float64(int(1) << Zoom)
+	west, east := tileID{8900, 5900}, tileID{8901, 5900}
+	wx := (float64(west.x) + float64(extent-5)/extent) / n
+	wy := (float64(west.y) + 2000.0/extent) / n
+	fr := newFrame(Pin{Lat: math.Atan(math.Sinh(math.Pi*(1-2*wy))) * 180 / math.Pi, Lng: wx*360 - 180})
+	hall := func(geometry []uint32) map[string]*layer {
+		return map[string]*layer{"building": {extent: extent, features: []feature{
+			{kind: geomPolygon, geometry: geometry, props: map[string]any{"render_height": int64(schemaDefaultHeight)}},
+		}}}
+	}
+	var sc scene
+	// The west tile has all of the hall: its 40 units east are in the buffer.
+	if err := sc.add(fr, west, hall(rect(extent-300, 1985, 340, 30)), 460); err != nil {
+		t.Fatal(err)
+	}
+	// The east tile has those 40 units and 64 of the 300 west of its edge.
+	if err := sc.add(fr, east, hall(rect(-buffer, 1985, buffer+40, 30)), 460); err != nil {
+		t.Fatal(err)
+	}
+	if len(sc.prisms) != 2 {
+		t.Fatalf("%d prisms, want the hall's two sides", len(sc.prisms))
+	}
+	w, e := sc.prisms[0], sc.prisms[1]
+	if w.z1 != 11 || e.z1 != 9.5 || !w.guessed || !e.guessed {
+		t.Fatalf("the tiles guess %v and %v m, want 11 and 9.5: the test shows nothing", w.z1, e.z1)
+	}
+	joinParts(sc.prisms)
+	evenHeights(sc.prisms)
+	if w.whole() != e.whole() {
+		t.Fatal("the two sides are not one building")
+	}
+	if w.z1 != 11 || e.z1 != 11 {
+		t.Errorf("the sides stand %v and %v m, want both at 11, the guess for the whole hall", w.z1, e.z1)
+	}
+
+	// A height the map states is left alone, part by part.
+	for _, p := range edgeScene(t).prisms {
+		if want := map[float64]float64{0: 12, 12: 20}[p.z0]; p.z1 != want || p.guessed {
+			t.Errorf("a part from %v m up stands %v m (guessed %v), want %v as the map says", p.z0, p.z1, p.guessed, want)
+		}
+	}
+
+	// And in every fixture place: no building in parts of two heights.
+	inParts := 0
+	for _, p := range places {
+		sc, _, err := loadScene(t.Context(), fixtures, p.Pin, MaxRadius+reachMargin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tops := map[*prism]float64{}
+		for _, pr := range sc.prisms {
+			if !pr.guessed || (pr.of == nil && !pr.outer.hasCut()) {
+				continue
+			}
+			b := pr.whole()
+			if top, seen := tops[b]; seen && top != pr.z1 {
+				t.Errorf("%s: a building's parts stand %v and %v m", p.Name, top, pr.z1)
+			}
+			tops[b] = pr.z1
+			if pr.of != nil {
+				inParts++
+			}
+		}
+	}
+	if inParts == 0 {
+		t.Error("no fixture building is in parts: the fixtures check nothing")
+	}
+}
+
+// TestNoRoofRisesPastTheCamera: a height mistyped in the map (300 m on a
+// house at the south of the disc) rose through the camera's own plane,
+// and the projection threw its corners 280,000 units out of a frame of
+// 1,600; a taller one came back inside out. Nothing is drawn above
+// tallest: every roof is above its own foot in the picture, on the pin
+// too, where the camera aims at it.
+func TestNoRoofRisesPastTheCamera(t *testing.T) {
+	number := regexp.MustCompile(`[ML](-?[0-9.]+),(-?[0-9.]+)`)
+	for _, radius := range []float64{MinRadius, MaxRadius, WidestRadius} {
+		top := tallest(radius)
+		for _, height := range []float64{300, 1000, 3659, 1e6} {
+			for _, pinned := range []bool{false, true} {
+				var sc scene
+				for i := range 50 { // the houses it stands among
+					sc.prisms = append(sc.prisms, box("", float64(i%10)*20-95, float64(i/10)*20+15, 10, 10, 9))
+				}
+				tower := box("", -5, -0.93*radius, 10, 10, height) // at the south of the disc
+				if pinned {
+					tower = box("", -5, -5, 10, 10, height)
+				}
+				// A part of it that stood wholly above what is drawn.
+				crown := box("", -5, tower.outer.pts[0].y, 10, 10, height+10)
+				crown.z0 = height
+				sc.prisms = append(sc.prisms, tower, crown)
+				pic := draw(sc, radius)
+				if pic.Pinned != pinned || pic.Buildings != 52 {
+					t.Fatalf("radius %v, %v m: pinned %v among %d buildings", radius, height, pic.Pinned, pic.Buildings)
+				}
+				if height > top && (tower.z1 != top || crown.z1 != top || crown.z0 != top-1) {
+					t.Errorf("radius %v: a %v m tower stands %v m and its crown from %v to %v, want them cut off at %v", radius, height, tower.z1, crown.z0, crown.z1, top)
+				}
+				target := 0.0
+				if pinned {
+					target = tower.z1
+				}
+				cam := newCamera(radius, target)
+				for _, p := range sc.prisms {
+					for _, q := range p.outer.pts {
+						if foot, roof := cam.project(q.x, q.y, p.z0), cam.project(q.x, q.y, p.z1); !(roof.y < foot.y) {
+							t.Fatalf("radius %v, %v m, pinned %v: a roof %v m up is drawn at %v, below its foot at %v", radius, height, pinned, p.z1, roof, foot)
+						}
+					}
+				}
+				svg := string(pic.SVG)
+				if strings.Contains(svg, "Inf") || strings.Contains(svg, "NaN") {
+					t.Fatalf("radius %v, %v m: the picture holds a number that is none", radius, height)
+				}
+				for _, m := range number.FindAllStringSubmatch(svg, -1) {
+					for _, v := range m[1:] {
+						if c, err := strconv.ParseFloat(v, 64); err != nil || math.Abs(c) > 4*Width {
+							t.Fatalf("radius %v, %v m, pinned %v: a point at %v (%v), frames away from the picture", radius, height, pinned, v, err)
+						}
+					}
+				}
+			}
+		}
+	}
+	// A real tower keeps its height: the tallest drawn at the closest
+	// disc is over 200 m.
+	if top := tallest(MinRadius); top < 200 || top > 250 {
+		t.Errorf("tallest(%v) = %v", MinRadius, top)
+	}
 }
 
 // TestAFootprintCutByATileEdgeIsOneBuilding: each tile draws its own side

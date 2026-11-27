@@ -60,6 +60,16 @@ func (p *prism) cutNorthOf(y float64) bool {
 	return true
 }
 
+// lowerTo cuts the prism off at a height (camera.go's tallest), leaving a
+// metre of a part that stood wholly above it.
+func (p *prism) lowerTo(top float64) {
+	if p.z1 <= top {
+		return
+	}
+	p.z1 = top
+	p.z0 = max(0, min(p.z0, top-1))
+}
+
 // patchKind is what a ground polygon is, in drawing order.
 type patchKind int
 
@@ -132,6 +142,7 @@ func loadScene(ctx context.Context, src Tiles, pin Pin, reach float64) (scene, i
 		}
 	}
 	joinParts(sc.prisms)
+	evenHeights(sc.prisms)
 	return sc, found, nil
 }
 
@@ -165,6 +176,35 @@ func joinParts(prisms []*prism) {
 // guesses from as much of the footprint as it carries.
 func sameHeights(p, q *prism) bool {
 	return p.z0 == q.z0 && (p.z1 == q.z1 || p.guessed && q.guessed)
+}
+
+// evenHeights gives the parts of one footprint one guessed height. Each
+// tile guesses from as much of the footprint as it carries, its own side
+// and some metres of the other, so the two sides of a building that runs
+// on across a tile edge could come out a storey apart: a step in the roof
+// along the edge, where no wall is drawn. The guess is made once more
+// from the parts' areas together, which is the footprint's own.
+func evenHeights(prisms []*prism) {
+	areas := map[*prism]float64{} // by building, of the buildings in parts
+	for _, p := range prisms {
+		if p.of != nil {
+			areas[p.whole()] = 0
+		}
+	}
+	if len(areas) == 0 {
+		return
+	}
+	for _, p := range prisms {
+		w := p.whole()
+		if _, inParts := areas[w]; inParts {
+			areas[w] += footprint(p)
+		}
+	}
+	for _, p := range prisms {
+		if a, inParts := areas[p.whole()]; inParts && p.guessed {
+			p.z1 = max(guessHeight(a), p.z0+1)
+		}
+	}
 }
 
 // tileReader converts one tile's features to metres and keeps those that

@@ -11,7 +11,7 @@ import (
 const (
 	// StyleVersion changes whenever the same tiles and pin draw a different
 	// picture, so cached pictures are drawn again.
-	StyleVersion = 3
+	StyleVersion = 4
 
 	// MinBuildings is the fewest buildings worth a picture; with fewer
 	// Render answers ErrTooSparse, and a page is better off with an
@@ -159,14 +159,16 @@ func footprint(p *prism) float64 {
 }
 
 // draw cuts the scene to the disc, finds the pinned building, orders the prisms and
-// writes the picture. It cuts the scene's prisms in place, so a scene is
-// drawn once.
+// writes the picture. It cuts the scene's prisms in place (to the ground
+// north of southEdge, and to the height the camera can see, tallest), so
+// a scene is drawn once.
 func draw(sc scene, radius float64) Picture {
 	d := &drawing{radius: radius}
 	target := 0.0
 	guessed := 0
 	origin := point{}
 	south := southEdge(radius)
+	top := tallest(radius)
 	buildings := map[*prism]bool{} // the buildings in the disc; true for the pinned one
 	for _, p := range sc.prisms {
 		c := centroid(p.outer.pts)
@@ -177,6 +179,8 @@ func draw(sc scene, radius float64) Picture {
 		if !p.cutNorthOf(south) {
 			continue
 		}
+		// Before the camera is aimed: it aims at the pinned roof.
+		p.lowerTo(top)
 		if holdsPin {
 			target = max(target, p.z1)
 		}
