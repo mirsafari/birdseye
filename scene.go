@@ -243,7 +243,7 @@ func polygons(paths [][]tpoint) [][][]tpoint {
 		if len(r) < 3 {
 			continue
 		}
-		a := tarea(r)
+		a := area(r)
 		switch {
 		case a > 0:
 			out = append(out, [][]tpoint{r})
@@ -361,7 +361,7 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 func (t tileReader) prism(f feature, poly [][]tpoint) (*prism, bool) {
 	whole := 0.0
 	for _, r := range poly {
-		whole += tarea(r)
+		whole += area(r)
 	}
 	whole *= math.Pow(t.u*t.fr.scale, 2)
 	outer, ok := t.clipped(poly[0])

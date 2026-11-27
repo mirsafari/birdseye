@@ -1,13 +1,12 @@
 package birdseye
 
 import (
-	"bytes"
-	"compress/gzip"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"slices"
+
+	"github.com/mirsafari/birdseye/internal/unzip"
 )
 
 // A vector tile (Mapbox Vector Tile 2.1) is a protocol buffer: layers of
@@ -94,8 +93,8 @@ func (f feature) paths() ([][]tpoint, error) {
 				cur = slices.Grow(cur, count+1)
 			}
 			for k := 0; k < count; k++ {
-				x += zigzag(g[i])
-				y += zigzag(g[i+1])
+				x += zigzag(uint64(g[i]))
+				y += zigzag(uint64(g[i+1]))
 				i += 2
 				if cmd == 1 {
 					if len(cur) > 0 {
@@ -134,8 +133,8 @@ func (f feature) bounds() (lo, hi tpoint, ok bool) {
 			continue
 		}
 		for k := 0; k < count && i+1 < len(g); k++ {
-			x += zigzag(g[i])
-			y += zigzag(g[i+1])
+			x += zigzag(uint64(g[i]))
+			y += zigzag(uint64(g[i+1]))
 			i += 2
 			lo.x, lo.y = min(lo.x, float64(x)), min(lo.y, float64(y))
 			hi.x, hi.y = max(hi.x, float64(x)), max(hi.y, float64(y))
@@ -145,7 +144,9 @@ func (f feature) bounds() (lo, hi tpoint, ok bool) {
 	return lo, hi, ok
 }
 
-func zigzag(v uint32) int64 { return int64(v>>1) ^ -int64(v&1) }
+// zigzag decodes a protocol buffer's zigzag-encoded signed number, as
+// the geometry's parameters and sint values are written.
+func zigzag(v uint64) int64 { return int64(v>>1) ^ -int64(v&1) }
 
 // maxTileBytes bounds a tile once unpacked (a zoom-14 tile of a city is a
 // megabyte or two), so a few kilobytes of gzip cannot ask for gigabytes.
@@ -154,19 +155,12 @@ const maxTileBytes = 64 << 20
 // gunzip unpacks data when it is gzipped and refuses more than limit
 // bytes of it.
 func gunzip(data []byte, limit int) ([]byte, error) {
-	if len(data) <= 2 || data[0] != 0x1f || data[1] != 0x8b {
+	if !unzip.Gzipped(data) {
 		return data, nil
 	}
-	zr, err := gzip.NewReader(bytes.NewReader(data))
+	out, err := unzip.Limited(data, int64(limit))
 	if err != nil {
 		return nil, fmt.Errorf("birdseye: gunzip tile: %w", err)
-	}
-	out, err := io.ReadAll(io.LimitReader(zr, int64(limit)+1))
-	if err != nil {
-		return nil, fmt.Errorf("birdseye: gunzip tile: %w", err)
-	}
-	if len(out) > limit {
-		return nil, fmt.Errorf("birdseye: gunzip tile: more than %d bytes", limit)
 	}
 	return out, nil
 }
@@ -364,7 +358,7 @@ func decodeValue(data []byte) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			out = int64(v>>1) ^ -int64(v&1)
+			out = zigzag(v)
 		case num == 7 && wire == 0:
 			v, err := p.varint()
 			if err != nil {

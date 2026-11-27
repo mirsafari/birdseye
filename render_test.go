@@ -116,7 +116,7 @@ func TestDecodeTileReadsLayersPropertiesAndRings(t *testing.T) {
 			t.Fatalf("paths = %v, want %v", paths[0], want)
 		}
 	}
-	if tarea(openRing(paths[0])) <= 0 {
+	if area(openRing(paths[0])) <= 0 {
 		t.Fatal("an exterior ring must have a positive area in tile units")
 	}
 	lo, hi, ok := f.bounds()

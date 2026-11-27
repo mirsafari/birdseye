@@ -17,7 +17,6 @@ package pmtiles
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -27,6 +26,8 @@ import (
 	"os"
 	"sort"
 	"sync"
+
+	"github.com/mirsafari/birdseye/internal/unzip"
 )
 
 // Compression is how the archive stores its directories or its tiles.
@@ -187,31 +188,13 @@ func (r *Reader) directory(offset, length uint64) ([]entry, error) {
 	switch r.header.InternalCompression {
 	case CompressionUnknown, CompressionNone:
 	case CompressionGzip:
-		if raw, err = gunzip(raw, maxRead); err != nil {
+		if raw, err = unzip.Limited(raw, maxRead); err != nil {
 			return nil, err
 		}
 	default:
 		return nil, fmt.Errorf("internal compression %d: only gzip or none is read", r.header.InternalCompression)
 	}
 	return decodeDirectory(raw)
-}
-
-// gunzip unpacks gzipped bytes and refuses more than limit of them, so a
-// damaged directory fails as one instead of decoding the part of it that
-// fits.
-func gunzip(data []byte, limit int64) ([]byte, error) {
-	zr, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	out, err := io.ReadAll(io.LimitReader(zr, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(out)) > limit {
-		return nil, fmt.Errorf("more than %d bytes unpacked", limit)
-	}
-	return out, nil
 }
 
 func (r *Reader) read(offset, length uint64) ([]byte, error) {

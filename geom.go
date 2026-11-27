@@ -18,24 +18,14 @@ type ring struct {
 func (r ring) hasCut() bool { return slices.Contains(r.cut, true) }
 
 // area is the signed area of the points as a ring: positive when they run
-// counter-clockwise with y pointing north.
-func area(pts []point) float64 {
+// counter-clockwise with y pointing north. In tile units, where y points
+// down, it is positive for an exterior ring of the tile format (clockwise
+// on screen) and negative for a hole.
+func area[P point | tpoint](pts []P) float64 {
 	var s float64
 	n := len(pts)
 	for i := range pts {
-		a, b := pts[i], pts[(i+1)%n]
-		s += a.x*b.y - b.x*a.y
-	}
-	return s / 2
-}
-
-// tarea is area in tile units, where y points down: an exterior ring of
-// the tile format is positive (clockwise on screen), a hole negative.
-func tarea(pts []tpoint) float64 {
-	var s float64
-	n := len(pts)
-	for i := range pts {
-		a, b := pts[i], pts[(i+1)%n]
+		a, b := point(pts[i]), point(pts[(i+1)%n])
 		s += a.x*b.y - b.x*a.y
 	}
 	return s / 2
