@@ -165,12 +165,41 @@ func openRing(pts []tpoint) []tpoint {
 	return pts
 }
 
-// clipRect clips a ring in tile units to the square [0, size]² (Sutherland
-// and Hodgman's algorithm, exact for a convex window) and marks the edges
-// that lie along the square's sides as cut. A concave ring cut into
-// several pieces comes back as one ring joined by zero-width bridges along
-// the side, which are cut edges too, so they draw nothing.
+// sideEps is how near a side of the tile's square a point counts as on
+// it, in tile units.
+const sideEps = 1e-6
+
+// clipRect clips a ring in tile units to the square [0, size]² and marks
+// the edges that lie along the square's sides as cut. Most rings stand
+// wholly inside their tile: those are not clipped at all, which is where
+// a drawing spent a third of what it allocated.
 func clipRect(pts []tpoint, size float64) (out []tpoint, cut []bool) {
+	if !insideSquare(pts, size) {
+		return clipSides(pts, size)
+	}
+	if out = dedupe(pts); len(out) < 3 {
+		return nil, nil
+	}
+	return out, make([]bool, len(out))
+}
+
+// insideSquare reports whether every point is inside the square and off
+// its sides: the ring then has nothing to clip and no edge along a side.
+func insideSquare(pts []tpoint, size float64) bool {
+	for _, p := range pts {
+		if !(p.x > sideEps && p.x < size-sideEps && p.y > sideEps && p.y < size-sideEps) {
+			return false
+		}
+	}
+	return true
+}
+
+// clipSides is clipRect for a ring that reaches a side of the square or
+// crosses one (Sutherland and Hodgman's algorithm, exact for a convex
+// window). A concave ring cut into several pieces comes back as one ring
+// joined by zero-width bridges along the side, which are cut edges too,
+// so they draw nothing.
+func clipSides(pts []tpoint, size float64) (out []tpoint, cut []bool) {
 	type plane struct {
 		in    func(tpoint) bool
 		cross func(a, b tpoint) tpoint
@@ -207,17 +236,16 @@ func clipRect(pts []tpoint, size float64) (out []tpoint, cut []bool) {
 	if len(out) < 3 {
 		return nil, nil
 	}
-	const eps = 1e-6
 	onSide := func(p tpoint, s int) bool {
 		switch s {
 		case 1:
-			return math.Abs(p.x) < eps
+			return math.Abs(p.x) < sideEps
 		case 2:
-			return math.Abs(p.x-size) < eps
+			return math.Abs(p.x-size) < sideEps
 		case 3:
-			return math.Abs(p.y) < eps
+			return math.Abs(p.y) < sideEps
 		case 4:
-			return math.Abs(p.y-size) < eps
+			return math.Abs(p.y-size) < sideEps
 		}
 		return false
 	}
@@ -237,7 +265,7 @@ func clipRect(pts []tpoint, size float64) (out []tpoint, cut []bool) {
 
 // dedupe drops repeated consecutive points, the closing one included.
 func dedupe[P point | tpoint](pts []P) []P {
-	out := pts[:0:0]
+	out := make([]P, 0, len(pts))
 	for i, p := range pts {
 		if i > 0 && p == out[len(out)-1] {
 			continue

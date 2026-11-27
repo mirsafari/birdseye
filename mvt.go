@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 )
 
 // A vector tile (Mapbox Vector Tile 2.1) is a protocol buffer: layers of
@@ -88,6 +89,9 @@ func (f feature) paths() ([][]tpoint, error) {
 		case 1, 2: // MoveTo, LineTo
 			if i+2*count > len(g) {
 				return nil, errMalformed
+			}
+			if cmd == 2 { // the path's points, and the one ClosePath repeats
+				cur = slices.Grow(cur, count+1)
 			}
 			for k := 0; k < count; k++ {
 				x += zigzag(g[i])

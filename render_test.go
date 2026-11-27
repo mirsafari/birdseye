@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -294,6 +295,70 @@ func TestClipRectMarksTheTileEdgeAsCut(t *testing.T) {
 	}
 	if pts2, _ := clipRect([]tpoint{{5000, 100}, {5100, 100}, {5100, 200}}, 4096); pts2 != nil {
 		t.Fatalf("a ring outside the tile survived: %v", pts2)
+	}
+}
+
+// TestARingInsideItsTileIsWhatClippingWouldLeave: clipRect does not clip
+// a ring that stands inside the tile's square, and gives exactly what
+// clipping it gave, for every ring of every fixture tile.
+func TestARingInsideItsTileIsWhatClippingWouldLeave(t *testing.T) {
+	inside, reaching := 0, 0
+	seen := map[[3]int]bool{}
+	for _, p := range places {
+		for _, id := range TilesFor(p.Pin) {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			data, err := fixtures.Tile(id[0], id[1], id[2])
+			if err != nil || data == nil {
+				continue
+			}
+			ls, err := decodeTile(data, layers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, l := range ls {
+				for _, f := range l.features {
+					if f.kind != geomPolygon {
+						continue
+					}
+					paths, err := f.paths()
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, path := range paths {
+						r := openRing(path)
+						if insideSquare(r, l.extent) {
+							inside++
+						} else {
+							reaching++
+						}
+						got, gotCut := clipRect(r, l.extent)
+						want, wantCut := clipSides(r, l.extent)
+						if !slices.Equal(got, want) || !slices.Equal(gotCut, wantCut) {
+							t.Fatalf("tile %v, layer %s: clipRect gives %v %v, clipping %v %v", id, name, got, gotCut, want, wantCut)
+						}
+					}
+				}
+			}
+		}
+	}
+	if inside == 0 || reaching == 0 {
+		t.Fatalf("%d rings inside their tile and %d reaching its edge: the test compares nothing", inside, reaching)
+	}
+	t.Logf("%d rings inside their tile, %d reaching its edge", inside, reaching)
+
+	// On a side is not inside: the edge along it is a cut.
+	if _, cut := clipRect([]tpoint{{0, 100}, {50, 100}, {50, 200}, {0, 200}}, 4096); !slices.Contains(cut, true) {
+		t.Error("a ring with an edge on the tile's side has no cut edge")
+	}
+	// Repeated points go, as clipping drops them.
+	if pts, _ := clipRect([]tpoint{{10, 10}, {10, 10}, {20, 10}, {20, 20}, {10, 10}}, 4096); len(pts) != 3 {
+		t.Errorf("a ring with repeated points keeps %v", pts)
+	}
+	if pts, _ := clipRect([]tpoint{{10, 10}, {20, 10}}, 4096); pts != nil {
+		t.Errorf("two points make a ring: %v", pts)
 	}
 }
 
