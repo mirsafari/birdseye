@@ -171,22 +171,25 @@ func clipRect(pts []tpoint, size float64) (out []tpoint, cut []bool) {
 	return out, make([]bool, len(out))
 }
 
-// insideSquare reports whether every point is inside the square and off
-// its sides: the ring then has nothing to clip and no edge along a side.
+// insideSquare reports whether no point is outside the square, its sides
+// included: the ring then has nothing to clip, and an edge of it along a
+// side is a wall the building has there, not one a tile edge made (the
+// footprint does not go on into the next tile, whose copy of it, in its
+// buffer, clips to nothing).
 func insideSquare(pts []tpoint, size float64) bool {
 	for _, p := range pts {
-		if !(p.x > sideEps && p.x < size-sideEps && p.y > sideEps && p.y < size-sideEps) {
+		if !(p.x >= 0 && p.x <= size && p.y >= 0 && p.y <= size) {
 			return false
 		}
 	}
 	return true
 }
 
-// clipSides is clipRect for a ring that reaches a side of the square or
-// crosses one (Sutherland and Hodgman's algorithm, exact for a convex
-// window). A concave ring cut into several pieces comes back as one ring
-// joined by zero-width bridges along the side, which are cut edges too,
-// so they draw nothing.
+// clipSides is clipRect for a ring that crosses a side of the square
+// (Sutherland and Hodgman's algorithm, exact for a convex window). A
+// concave ring cut into several pieces comes back as one ring joined by
+// zero-width bridges along the side, which are cut edges too, so they
+// draw nothing.
 func clipSides(pts []tpoint, size float64) (out []tpoint, cut []bool) {
 	in := func(k int, p tpoint) bool {
 		switch k {
@@ -220,7 +223,9 @@ func clipSides(pts []tpoint, size float64) (out []tpoint, cut []bool) {
 	}
 	out = clipPolygon(pts, 4, in, cross)
 	out = dedupe(out)
-	if len(out) < 3 {
+	// What is left of a footprint that only touches the square, a line
+	// along its side, is nothing.
+	if len(out) < 3 || math.Abs(area(out)) < sideEps {
 		return nil, nil
 	}
 	onSide := func(p tpoint, s int) bool {

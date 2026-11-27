@@ -462,9 +462,20 @@ func TestAClippedLineComesBackInItsPieces(t *testing.T) {
 
 // TestARingInsideItsTileIsWhatClippingWouldLeave: clipRect does not clip
 // a ring that stands inside the tile's square, and gives exactly what
-// clipping it gave, for every ring of every fixture tile.
+// clipping it gave, for every ring of every fixture tile. A ring that
+// reaches a side without going past it keeps the points clipping leaves,
+// and its edge along the side is a wall the building has there, not a
+// cut: the footprint does not go on into the next tile.
 func TestARingInsideItsTileIsWhatClippingWouldLeave(t *testing.T) {
-	inside, reaching := 0, 0
+	inside, onSide, reaching := 0, 0, 0
+	strictly := func(r []tpoint, size float64) bool {
+		for _, p := range r {
+			if !(p.x > 0 && p.x < size && p.y > 0 && p.y < size) {
+				return false
+			}
+		}
+		return true
+	}
 	seen := map[[3]int]bool{}
 	for _, p := range places {
 		for _, id := range TilesFor(p.Pin) {
@@ -494,29 +505,47 @@ func TestARingInsideItsTileIsWhatClippingWouldLeave(t *testing.T) {
 					}
 					for _, path := range paths {
 						r := openRing(path)
-						if insideSquare(r, l.extent) {
-							inside++
-						} else {
-							reaching++
-						}
 						got, gotCut := clipRect(r, l.extent)
 						want, wantCut := clipSides(r, l.extent)
-						if !slices.Equal(got, want) || !slices.Equal(gotCut, wantCut) {
-							t.Fatalf("tile %v, layer %s: clipRect gives %v %v, clipping %v %v", id, name, got, gotCut, want, wantCut)
+						switch {
+						case strictly(r, l.extent):
+							inside++
+							if !slices.Equal(got, want) || !slices.Equal(gotCut, wantCut) {
+								t.Fatalf("tile %v, layer %s: clipRect gives %v %v, clipping %v %v", id, name, got, gotCut, want, wantCut)
+							}
+						case insideSquare(r, l.extent):
+							onSide++
+							if !slices.Equal(got, want) || slices.Contains(gotCut, true) {
+								t.Fatalf("tile %v, layer %s: a ring on the side gives %v %v, clipping %v", id, name, got, gotCut, want)
+							}
+						default:
+							reaching++
+							if !slices.Equal(got, want) || !slices.Equal(gotCut, wantCut) {
+								t.Fatalf("tile %v, layer %s: clipRect gives %v %v, clipping %v %v", id, name, got, gotCut, want, wantCut)
+							}
 						}
 					}
 				}
 			}
 		}
 	}
-	if inside == 0 || reaching == 0 {
-		t.Fatalf("%d rings inside their tile and %d reaching its edge: the test compares nothing", inside, reaching)
+	if inside == 0 || onSide == 0 || reaching == 0 {
+		t.Fatalf("%d rings inside their tile, %d on its side and %d past it: the test compares too little", inside, onSide, reaching)
 	}
-	t.Logf("%d rings inside their tile, %d reaching its edge", inside, reaching)
+	t.Logf("%d rings inside their tile, %d on its side, %d past it", inside, onSide, reaching)
 
-	// On a side is not inside: the edge along it is a cut.
-	if _, cut := clipRect([]tpoint{{0, 100}, {50, 100}, {50, 200}, {0, 200}}, 4096); !slices.Contains(cut, true) {
-		t.Error("a ring with an edge on the tile's side has no cut edge")
+	// On a side is a wall: nothing is cut.
+	if _, cut := clipRect([]tpoint{{0, 100}, {50, 100}, {50, 200}, {0, 200}}, 4096); slices.Contains(cut, true) {
+		t.Error("a ring with an edge on the tile's side has a cut edge")
+	}
+	// Past a side, the edge along it is a cut.
+	if _, cut := clipRect([]tpoint{{-10, 100}, {50, 100}, {50, 200}, {-10, 200}}, 4096); !slices.Contains(cut, true) {
+		t.Error("a ring cut by the tile's side has no cut edge")
+	}
+	// The neighbour's copy of a footprint on the side, in its buffer,
+	// clips to nothing, its points along the side included.
+	if pts, _ := clipRect([]tpoint{{-50, 100}, {0, 100}, {0, 150}, {0, 200}, {-50, 200}}, 4096); pts != nil {
+		t.Errorf("the neighbour's copy of a footprint on the side leaves %v", pts)
 	}
 	// Repeated points go, as clipping drops them.
 	if pts, _ := clipRect([]tpoint{{10, 10}, {10, 10}, {20, 10}, {20, 20}, {10, 10}}, 4096); len(pts) != 3 {
