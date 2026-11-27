@@ -315,6 +315,15 @@ func TestHeights(t *testing.T) {
 		{map[string]any{"render_height": int64(5)}, 500, 0, 9.5, true},
 		{map[string]any{}, 2000, 0, 11, true},
 		{map[string]any{"render_height": int64(12), "render_min_height": int64(12)}, 50, 12, 13, false},
+		// Heights that are none are not believed: the ground, or a guess.
+		{map[string]any{"render_height": int64(24), "render_min_height": math.NaN()}, 300, 0, 24, false},
+		{map[string]any{"render_height": int64(24), "render_min_height": math.Inf(-1)}, 300, 0, 24, false},
+		{map[string]any{"render_height": int64(24), "render_min_height": math.Inf(1)}, 300, 0, 24, false},
+		{map[string]any{"render_height": int64(24), "render_min_height": int64(-6)}, 300, 0, 24, false},
+		{map[string]any{"render_height": math.NaN()}, 500, 0, 9.5, true},
+		{map[string]any{"render_height": math.Inf(1)}, 500, 0, 9.5, true},
+		{map[string]any{"render_height": int64(-12)}, 500, 0, 9.5, true},
+		{map[string]any{"render_height": math.NaN(), "render_min_height": int64(20)}, 500, 20, 21, true},
 	}
 	for _, c := range cases {
 		z0, z1, g := heights(f(c.props), c.footprint)
