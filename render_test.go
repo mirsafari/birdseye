@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"regexp"
@@ -70,6 +72,42 @@ func (b pb) packed(num int, vs ...uint32) pb {
 	return b.bytes(num, p)
 }
 func zz(v int32) uint32 { return uint32((v << 1) ^ (v >> 31)) }
+
+// newFeature is a feature as a tile carries it: the properties and the
+// geometry encoded into a layer and decoded again.
+func newFeature(t testing.TB, kind geomType, geometry []uint32, props map[string]any) feature {
+	t.Helper()
+	keys := slices.Sorted(maps.Keys(props))
+	layerBytes := pb{}.uint(15, 2).bytes(1, []byte("building")).uint(5, 4096)
+	var tags []uint32
+	for i, k := range keys {
+		var v pb
+		switch x := props[k].(type) {
+		case string:
+			v = v.bytes(1, []byte(x))
+		case float64:
+			v = append(v.key(3, 1), binary.LittleEndian.AppendUint64(nil, math.Float64bits(x))...)
+		case int64:
+			v = v.uint(6, uint64((x<<1)^(x>>63)))
+		case bool:
+			b := uint64(0)
+			if x {
+				b = 1
+			}
+			v = v.uint(7, b)
+		default:
+			t.Fatalf("property %s: %T", k, x)
+		}
+		layerBytes = layerBytes.bytes(3, []byte(k)).bytes(4, v)
+		tags = append(tags, uint32(i), uint32(i))
+	}
+	layerBytes = layerBytes.bytes(2, pb{}.packed(2, tags...).uint(3, uint64(kind)).packed(4, geometry...))
+	ls, err := decodeTile(pb{}.bytes(3, layerBytes), layers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ls["building"].features[0]
+}
 
 // square is a polygon feature's geometry: one clockwise (on screen) ring.
 func square(x, y, size int32) []uint32 {
@@ -262,7 +300,7 @@ func TestTileUnitsRoundTripToMetres(t *testing.T) {
 }
 
 func TestHeights(t *testing.T) {
-	f := func(props map[string]any) feature { return feature{props: props} }
+	f := func(props map[string]any) feature { return newFeature(t, geomPolygon, nil, props) }
 	cases := []struct {
 		props     map[string]any
 		footprint float64
@@ -735,8 +773,7 @@ func edgeScene(t *testing.T) scene {
 	fr := newFrame(Pin{Lat: math.Atan(math.Sinh(math.Pi*(1-2*wy))) * 180 / math.Pi, Lng: wx*360 - 180})
 
 	building := func(height, minHeight int64, geometry []uint32) feature {
-		return feature{kind: geomPolygon, geometry: geometry,
-			props: map[string]any{"render_height": height, "render_min_height": minHeight}}
+		return newFeature(t, geomPolygon, geometry, map[string]any{"render_height": height, "render_min_height": minHeight})
 	}
 	// x is where the tile has its own east (or west) edge: the buildings
 	// reach 20 units to either side of it.
@@ -786,7 +823,7 @@ func TestTheSidesOfACutBuildingAreOneHeight(t *testing.T) {
 	fr := newFrame(Pin{Lat: math.Atan(math.Sinh(math.Pi*(1-2*wy))) * 180 / math.Pi, Lng: wx*360 - 180})
 	hall := func(geometry []uint32) map[string]*layer {
 		return map[string]*layer{"building": {extent: extent, features: []feature{
-			{kind: geomPolygon, geometry: geometry, props: map[string]any{"render_height": int64(schemaDefaultHeight)}},
+			newFeature(t, geomPolygon, geometry, map[string]any{"render_height": int64(schemaDefaultHeight)}),
 		}}}
 	}
 	var sc scene

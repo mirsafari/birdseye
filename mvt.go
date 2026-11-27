@@ -27,29 +27,50 @@ const (
 	geomPolygon geomType = 3
 )
 
-// layer is one decoded layer of a tile.
+// layer is one decoded layer of a tile: its features and the keys and
+// values their tags index.
 type layer struct {
 	extent   float64
+	keys     []string
+	values   []any // string, float64, int64 or bool
 	features []feature
 }
 
-// feature is one feature: its type, its properties and its geometry as
-// the command stream, decoded into paths only when it is wanted.
+// feature is one feature: its type, and its tags and geometry as the
+// packed varints the tile holds, checked when the tile was decoded and
+// read only when the feature is wanted. Most features of a tile are far
+// from the pin, and a picture reads a handful of properties of the rest.
 type feature struct {
 	kind     geomType
-	props    map[string]any // string, float64, int64 or bool
-	geometry []uint32
+	layer    *layer // whose keys and values the tags index
+	tags     []byte // key and value indexes, in pairs
+	geometry []byte // the command stream
+	values   int    // how many varints the geometry holds
+}
+
+// prop is a property's value, nil when absent. A key given twice is the
+// later value, as a map filled in tag order holds it.
+func (f feature) prop(key string) any {
+	var out any
+	t := varints{b: f.tags}
+	for n := t.count(); n >= 2; n -= 2 {
+		k, v := t.next(), t.next()
+		if f.layer.keys[k] == key {
+			out = f.layer.values[v]
+		}
+	}
+	return out
 }
 
 // str is a string property, "" when absent or not a string.
 func (f feature) str(key string) string {
-	s, _ := f.props[key].(string)
+	s, _ := f.prop(key).(string)
 	return s
 }
 
 // num is a numeric property, 0 when absent.
 func (f feature) num(key string) float64 {
-	switch v := f.props[key].(type) {
+	switch v := f.prop(key).(type) {
 	case float64:
 		return v
 	case int64:
@@ -60,7 +81,7 @@ func (f feature) num(key string) float64 {
 
 // flag is a boolean property (a number other than 0 counts as true).
 func (f feature) flag(key string) bool {
-	switch v := f.props[key].(type) {
+	switch v := f.prop(key).(type) {
 	case bool:
 		return v
 	case int64:
@@ -69,6 +90,53 @@ func (f feature) flag(key string) bool {
 		return v != 0
 	}
 	return false
+}
+
+// varints reads packed varints that were checked (checkPacked) when the
+// tile was decoded, as the uint32 values the tile format stores.
+type varints struct {
+	b []byte
+	i int
+}
+
+func (v *varints) next() uint32 {
+	var x uint64
+	for shift := uint(0); ; shift += 7 {
+		c := v.b[v.i]
+		v.i++
+		x |= uint64(c&0x7f) << shift
+		if c < 0x80 {
+			return uint32(x)
+		}
+	}
+}
+
+// count is how many varints are left, counted by their last bytes.
+func (v varints) count() int {
+	n := 0
+	for _, c := range v.b[v.i:] {
+		if c < 0x80 {
+			n++
+		}
+	}
+	return n
+}
+
+// checkPacked reports how many varints packed bytes hold, or false when
+// they are not whole varints of at most ten bytes each.
+func checkPacked(b []byte) (int, bool) {
+	n, run := 0, 0
+	for _, c := range b {
+		run++
+		if run > 10 {
+			return 0, false
+		}
+		if c < 0x80 {
+			n++
+			run = 0
+		}
+	}
+	return n, run == 0
 }
 
 // tpoint is a position in tile units.
@@ -80,21 +148,22 @@ func (f feature) paths() ([][]tpoint, error) {
 	var out [][]tpoint
 	var cur []tpoint
 	var x, y int64
-	g := f.geometry
-	for i := 0; i < len(g); {
-		cmd, count := g[i]&7, int(g[i]>>3)
+	g := varints{b: f.geometry}
+	for i := 0; i < f.values; {
+		c := g.next()
+		cmd, count := c&7, int(c>>3)
 		i++
 		switch cmd {
 		case 1, 2: // MoveTo, LineTo
-			if i+2*count > len(g) {
+			if i+2*count > f.values {
 				return nil, errMalformed
 			}
 			if cmd == 2 { // the path's points, and the one ClosePath repeats
 				cur = slices.Grow(cur, count+1)
 			}
 			for k := 0; k < count; k++ {
-				x += zigzag(uint64(g[i]))
-				y += zigzag(uint64(g[i+1]))
+				x += zigzag(uint64(g.next()))
+				y += zigzag(uint64(g.next()))
 				i += 2
 				if cmd == 1 {
 					if len(cur) > 0 {
@@ -125,16 +194,17 @@ func (f feature) bounds() (lo, hi tpoint, ok bool) {
 	var x, y int64
 	lo = tpoint{math.Inf(1), math.Inf(1)}
 	hi = tpoint{math.Inf(-1), math.Inf(-1)}
-	g := f.geometry
-	for i := 0; i < len(g); {
-		cmd, count := g[i]&7, int(g[i]>>3)
+	g := varints{b: f.geometry}
+	for i := 0; i < f.values; {
+		c := g.next()
+		cmd, count := c&7, int(c>>3)
 		i++
 		if cmd == 7 {
 			continue
 		}
-		for k := 0; k < count && i+1 < len(g); k++ {
-			x += zigzag(uint64(g[i]))
-			y += zigzag(uint64(g[i+1]))
+		for k := 0; k < count && i+1 < f.values; k++ {
+			x += zigzag(uint64(g.next()))
+			y += zigzag(uint64(g.next()))
 			i += 2
 			lo.x, lo.y = min(lo.x, float64(x)), min(lo.y, float64(y))
 			hi.x, hi.y = max(hi.x, float64(x)), max(hi.y, float64(y))
@@ -265,9 +335,9 @@ func decodeLayer(data []byte, wanted map[string]bool) (string, *layer, error) {
 	if extent == 0 { // every position would divide by it
 		return "", nil, errMalformed
 	}
-	l := &layer{extent: extent, features: make([]feature, 0, len(features))}
+	l := &layer{extent: extent, keys: keys, values: values, features: make([]feature, 0, len(features))}
 	for _, raw := range features {
-		f, err := decodeFeature(raw, keys, values)
+		f, err := decodeFeature(raw, l)
 		if err != nil {
 			return "", nil, err
 		}
@@ -276,8 +346,11 @@ func decodeLayer(data []byte, wanted map[string]bool) (string, *layer, error) {
 	return name, l, nil
 }
 
-func decodeFeature(data []byte, keys []string, values []any) (feature, error) {
-	f := feature{props: map[string]any{}}
+// decodeFeature reads a feature's type and finds its tags and geometry,
+// checking that they are whole varints and that every tag indexes one of
+// the layer's keys and values, so reading them later cannot fail.
+func decodeFeature(data []byte, l *layer) (feature, error) {
+	f := feature{layer: l}
 	p := pbuf{b: data}
 	for !p.done() {
 		num, wire, err := p.field()
@@ -286,19 +359,24 @@ func decodeFeature(data []byte, keys []string, values []any) (feature, error) {
 		}
 		switch {
 		case num == 2 && wire == 2:
-			tags, err := p.packed()
+			b, err := p.bytes()
 			if err != nil {
 				return f, err
 			}
-			for i := 0; i+1 < len(tags); i += 2 {
+			n, ok := checkPacked(b)
+			if !ok {
+				return f, errMalformed
+			}
+			t := varints{b: b}
+			for ; n >= 2; n -= 2 {
 				// Compared unsigned: as an int, an index past 2³¹ is
 				// negative where int has 32 bits.
-				k, v := tags[i], tags[i+1]
-				if uint64(k) >= uint64(len(keys)) || uint64(v) >= uint64(len(values)) {
+				k, v := t.next(), t.next()
+				if uint64(k) >= uint64(len(l.keys)) || uint64(v) >= uint64(len(l.values)) {
 					return f, errMalformed
 				}
-				f.props[keys[k]] = values[v]
 			}
+			f.tags = b
 		case num == 3 && wire == 0:
 			v, err := p.varint()
 			if err != nil {
@@ -306,11 +384,15 @@ func decodeFeature(data []byte, keys []string, values []any) (feature, error) {
 			}
 			f.kind = geomType(v)
 		case num == 4 && wire == 2:
-			g, err := p.packed()
+			b, err := p.bytes()
 			if err != nil {
 				return f, err
 			}
-			f.geometry = g
+			n, ok := checkPacked(b)
+			if !ok {
+				return f, errMalformed
+			}
+			f.geometry, f.values = b, n
 		default:
 			if err := p.skip(wire); err != nil {
 				return f, err
@@ -417,23 +499,6 @@ func (p *pbuf) bytes() ([]byte, error) {
 	b := p.b[p.i : p.i+int(n)]
 	p.i += int(n)
 	return b, nil
-}
-
-func (p *pbuf) packed() ([]uint32, error) {
-	b, err := p.bytes()
-	if err != nil {
-		return nil, err
-	}
-	q := pbuf{b: b}
-	out := make([]uint32, 0, len(b))
-	for !q.done() {
-		v, err := q.varint()
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, uint32(v))
-	}
-	return out, nil
 }
 
 func (p *pbuf) fixed(n int) (uint64, error) {
