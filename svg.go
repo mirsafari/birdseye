@@ -93,7 +93,7 @@ func (w *svgWriter) ground(pts []point) []point {
 
 // drawing is what one picture draws, cut to its disc.
 type drawing struct {
-	radius  float64
+	disc    disc
 	prisms  []*prism // back to front
 	patches []patch
 	strokes []stroke
@@ -108,9 +108,8 @@ func writeSVG(d *drawing, cam camera) []byte {
 	w.buf.WriteString(strconv.Itoa(Width) + " " + strconv.Itoa(Height))
 	w.buf.WriteString(`"><g id="` + symbolID + `" stroke-linejoin="round" stroke-width="` + edgeWidth + `">`)
 
-	disc := discPolygon(d.radius, discSegments)
 	w.open(`fill="` + colGround + `"`)
-	w.ring(w.ground(disc))
+	w.ring(w.ground(d.disc.polygon))
 	w.close()
 
 	for _, kind := range []patchKind{patchGreen, patchWater, patchPaved} {

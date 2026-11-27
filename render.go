@@ -163,7 +163,7 @@ func footprint(p *prism) float64 {
 // north of southEdge, and to the height the camera can see, tallest), so
 // a scene is drawn once.
 func draw(sc scene, radius float64) Picture {
-	d := &drawing{radius: radius}
+	d := &drawing{disc: newDisc(radius)}
 	target := 0.0
 	guessed := 0
 	origin := point{}
@@ -200,13 +200,11 @@ func draw(sc scene, radius float64) Picture {
 		pinned = pinned || p.pinned
 	}
 
-	// Ground polygons and lines are cut to the disc; the polygon window
-	// is the drawn disc itself and lines stop just inside it.
-	window := discPolygon(radius, discSegments)
+	// Ground polygons and lines are cut to the disc.
 	for _, pt := range sc.patches {
 		var rings [][]point
 		for i, r := range pt.rings {
-			c := clipConvex(r, window)
+			c := d.disc.clip(r)
 			if len(c) < 3 {
 				if i == 0 {
 					break
@@ -222,9 +220,8 @@ func draw(sc scene, radius float64) Picture {
 			d.patches = append(d.patches, patch{kind: pt.kind, rings: rings})
 		}
 	}
-	inner := radius * math.Cos(math.Pi/discSegments)
 	for _, s := range sc.strokes {
-		for _, part := range clipLineCircle(s.pts, inner) {
+		for _, part := range d.disc.cutLine(s.pts) {
 			d.strokes = append(d.strokes, stroke{kind: s.kind, width: s.width, pts: part})
 		}
 	}

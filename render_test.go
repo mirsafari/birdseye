@@ -1092,3 +1092,50 @@ func TestWhatIsCutSouthIsBelowTheFrame(t *testing.T) {
 	}
 	t.Logf("%d footprint points south of the line, all below the frame", cut)
 }
+
+// TestTheDiscCutsAsClippingWould: the disc keeps a ring wholly inside it
+// and drops a ring or line whose box misses it without clipping either,
+// and gives exactly what clipping gave, for every ground ring and line of
+// every fixture place, at the place's own radius and at the narrowest.
+func TestTheDiscCutsAsClippingWould(t *testing.T) {
+	within, missed, clipped := 0, 0, 0
+	for _, p := range places {
+		sc, _, err := loadScene(t.Context(), fixtures, p.Pin, MaxRadius+reachMargin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, radius := range []float64{placeRadius(sc.prisms), MinRadius} {
+			d := newDisc(radius)
+			for _, pt := range sc.patches {
+				for _, r := range pt.rings {
+					switch {
+					case misses(r, d.radius):
+						missed++
+					case d.within(r):
+						within++
+					default:
+						clipped++
+					}
+					if got, want := d.clip(r), clipConvex(r, d.polygon); !slices.Equal(got, want) {
+						t.Fatalf("%s at %v m: the disc cuts a ring to %v, clipping to %v", p.Name, radius, got, want)
+					}
+				}
+			}
+			for _, s := range sc.strokes {
+				got, want := d.cutLine(s.pts), clipLineCircle(s.pts, d.inner)
+				if len(got) != len(want) {
+					t.Fatalf("%s at %v m: the disc cuts a line to %d pieces, clipping to %d", p.Name, radius, len(got), len(want))
+				}
+				for i := range got {
+					if !slices.Equal(got[i], want[i]) {
+						t.Fatalf("%s at %v m: the disc cuts a line to %v, clipping to %v", p.Name, radius, got[i], want[i])
+					}
+				}
+			}
+		}
+	}
+	if within == 0 || missed == 0 || clipped == 0 {
+		t.Fatalf("%d rings within, %d missed, %d clipped: the test compares too little", within, missed, clipped)
+	}
+	t.Logf("%d ground rings within the disc, %d missing it, %d clipped", within, missed, clipped)
+}

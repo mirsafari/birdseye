@@ -186,38 +186,37 @@ func insideSquare(pts []tpoint, size float64) bool {
 // joined by zero-width bridges along the side, which are cut edges too,
 // so they draw nothing.
 func clipSides(pts []tpoint, size float64) (out []tpoint, cut []bool) {
-	type plane struct {
-		in    func(tpoint) bool
-		cross func(a, b tpoint) tpoint
+	in := func(k int, p tpoint) bool {
+		switch k {
+		case 0:
+			return p.x >= 0
+		case 1:
+			return p.x <= size
+		case 2:
+			return p.y >= 0
+		}
+		return p.y <= size
 	}
 	at := func(a, b tpoint, t float64) tpoint { return tpoint{a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t} }
-	planes := []plane{
-		{func(p tpoint) bool { return p.x >= 0 }, func(a, b tpoint) tpoint { p := at(a, b, a.x/(a.x-b.x)); p.x = 0; return p }},
-		{func(p tpoint) bool { return p.x <= size }, func(a, b tpoint) tpoint { p := at(a, b, (a.x-size)/(a.x-b.x)); p.x = size; return p }},
-		{func(p tpoint) bool { return p.y >= 0 }, func(a, b tpoint) tpoint { p := at(a, b, a.y/(a.y-b.y)); p.y = 0; return p }},
-		{func(p tpoint) bool { return p.y <= size }, func(a, b tpoint) tpoint { p := at(a, b, (a.y-size)/(a.y-b.y)); p.y = size; return p }},
-	}
-	out = pts
-	for _, pl := range planes {
-		if len(out) == 0 {
-			return nil, nil
+	cross := func(k int, a, b tpoint) tpoint {
+		var p tpoint
+		switch k {
+		case 0:
+			p = at(a, b, a.x/(a.x-b.x))
+			p.x = 0
+		case 1:
+			p = at(a, b, (a.x-size)/(a.x-b.x))
+			p.x = size
+		case 2:
+			p = at(a, b, a.y/(a.y-b.y))
+			p.y = 0
+		default:
+			p = at(a, b, (a.y-size)/(a.y-b.y))
+			p.y = size
 		}
-		in := out
-		out = make([]tpoint, 0, len(in)+4)
-		n := len(in)
-		for i := range in {
-			a, b := in[(i+n-1)%n], in[i]
-			ia, ib := pl.in(a), pl.in(b)
-			switch {
-			case ia && ib:
-				out = append(out, b)
-			case ia && !ib:
-				out = append(out, pl.cross(a, b))
-			case !ia && ib:
-				out = append(out, pl.cross(a, b), b)
-			}
-		}
+		return p
 	}
+	out = clipPolygon(pts, 4, in, cross)
 	out = dedupe(out)
 	if len(out) < 3 {
 		return nil, nil
@@ -265,41 +264,57 @@ func dedupe[P point | tpoint](pts []P) []P {
 }
 
 // clipConvex clips a ring to a convex window whose points run counter-
-// clockwise (Sutherland and Hodgman).
+// clockwise.
 func clipConvex(pts []point, window []point) []point {
-	out := pts
 	m := len(window)
-	for k := range window {
+	side := func(k int, p point) float64 {
+		e0, e1 := window[k], window[(k+1)%m]
+		return (e1.x-e0.x)*(p.y-e0.y) - (e1.y-e0.y)*(p.x-e0.x)
+	}
+	in := func(k int, p point) bool { return side(k, p) >= 0 }
+	cross := func(k int, a, b point) point {
+		da, db := side(k, a), side(k, b)
+		t := da / (da - db)
+		return point{a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t}
+	}
+	out := dedupe(clipPolygon(pts, m, in, cross))
+	if len(out) < 3 {
+		return nil
+	}
+	return out
+}
+
+// clipPolygon is Sutherland and Hodgman's algorithm, exact for a convex
+// window: it clips a ring to n half-planes in turn, plane k keeping the
+// points in(k, p) says are in, and cross(k, a, b) is where the edge from a
+// to b crosses it. Its two buffers take turns, so a clip allocates twice
+// however many planes it has (the disc has 96); the ring it returns is in
+// one of them, for the caller to copy (dedupe does).
+func clipPolygon[P point | tpoint](pts []P, n int, in func(k int, p P) bool, cross func(k int, a, b P) P) []P {
+	var bufs [2][]P
+	out := pts
+	for k := range n {
 		if len(out) == 0 {
 			return nil
 		}
-		e0, e1 := window[k], window[(k+1)%m]
-		inside := func(p point) bool { return (e1.x-e0.x)*(p.y-e0.y)-(e1.y-e0.y)*(p.x-e0.x) >= 0 }
-		cross := func(a, b point) point {
-			da := (e1.x-e0.x)*(a.y-e0.y) - (e1.y-e0.y)*(a.x-e0.x)
-			db := (e1.x-e0.x)*(b.y-e0.y) - (e1.y-e0.y)*(b.x-e0.x)
-			t := da / (da - db)
-			return point{a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t}
+		src, dst := out, bufs[k%2][:0]
+		if dst == nil {
+			dst = make([]P, 0, len(src)+8)
 		}
-		in := out
-		out = make([]point, 0, len(in)+4)
-		n := len(in)
-		for i := range in {
-			a, b := in[(i+n-1)%n], in[i]
-			ia, ib := inside(a), inside(b)
+		m := len(src)
+		for i := range src {
+			a, b := src[(i+m-1)%m], src[i]
+			ia, ib := in(k, a), in(k, b)
 			switch {
 			case ia && ib:
-				out = append(out, b)
+				dst = append(dst, b)
 			case ia && !ib:
-				out = append(out, cross(a, b))
+				dst = append(dst, cross(k, a, b))
 			case !ia && ib:
-				out = append(out, cross(a, b), b)
+				dst = append(dst, cross(k, a, b), b)
 			}
 		}
-	}
-	out = dedupe(out)
-	if len(out) < 3 {
-		return nil
+		bufs[k%2], out = dst, dst
 	}
 	return out
 }
@@ -417,12 +432,74 @@ func clipLineCircle(pts []point, radius float64) [][]point {
 	return kept.done()
 }
 
-// discPolygon is the drawn disc as a counter-clockwise polygon.
-func discPolygon(radius float64, n int) []point {
-	out := make([]point, n)
-	for k := range out {
-		a := 2 * math.Pi * float64(k) / float64(n)
-		out[k] = point{radius * math.Cos(a), radius * math.Sin(a)}
+// disc is the drawn disc: the ground under it is a polygon of
+// discSegments sides around the pin, the window ground polygons are cut
+// to, and lines stop just inside it, at the polygon's inscribed circle.
+type disc struct {
+	radius  float64
+	polygon []point // counter-clockwise, its corners on the circle
+	inner   float64 // the inscribed circle's radius
+}
+
+func newDisc(radius float64) disc {
+	d := disc{radius: radius, polygon: make([]point, discSegments), inner: radius * math.Cos(math.Pi/discSegments)}
+	for k := range d.polygon {
+		a := 2 * math.Pi * float64(k) / float64(discSegments)
+		d.polygon[k] = point{radius * math.Cos(a), radius * math.Sin(a)}
 	}
-	return out
+	return d
+}
+
+// within reports whether every point is inside the inscribed circle, and
+// so inside every side of the polygon, with a margin far wider than the
+// side test's rounding.
+func (d disc) within(pts []point) bool {
+	r2 := d.inner * d.inner * (1 - 1e-9)
+	for _, p := range pts {
+		if p.x*p.x+p.y*p.y >= r2 {
+			return false
+		}
+	}
+	return true
+}
+
+// misses reports whether the points' box lies wholly outside the circle
+// of radius r around the pin, with a margin: nothing of them can reach a
+// window inside that circle, and every point clipping leaves lies in
+// their box (what Sutherland and Hodgman's algorithm keeps lies in the
+// convex hull of what it is given).
+func misses(pts []point, r float64) bool {
+	lo, hi := point{math.Inf(1), math.Inf(1)}, point{math.Inf(-1), math.Inf(-1)}
+	for _, p := range pts {
+		lo.x, lo.y = min(lo.x, p.x), min(lo.y, p.y)
+		hi.x, hi.y = max(hi.x, p.x), max(hi.y, p.y)
+	}
+	// The box's point nearest the pin.
+	nx, ny := max(lo.x, min(0, hi.x)), max(lo.y, min(0, hi.y))
+	return nx*nx+ny*ny > r*r*(1+1e-9)
+}
+
+// clip cuts a ground ring to the polygon. A ring wholly inside comes back
+// as clipping would give it (every point kept, in order) without the 96
+// passes, and one wholly outside the circle as nothing.
+func (d disc) clip(pts []point) []point {
+	switch {
+	case misses(pts, d.radius):
+		return nil
+	case d.within(pts):
+		if out := dedupe(pts); len(out) >= 3 {
+			return out
+		}
+		return nil
+	}
+	return clipConvex(pts, d.polygon)
+}
+
+// cutLine cuts a ground line to the inscribed circle; a line whose box
+// misses the circle leaves nothing.
+func (d disc) cutLine(pts []point) [][]point {
+	if misses(pts, d.inner) {
+		return nil
+	}
+	return clipLineCircle(pts, d.inner)
 }
