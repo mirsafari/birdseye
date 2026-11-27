@@ -1215,3 +1215,24 @@ func TestOnlyPolygonsThatCanDrawAreConverted(t *testing.T) {
 		}
 	}
 }
+
+// TestReverseKeepsEachCutFlagOnItsEdge: a ring turned the other way in
+// place keeps its points and the cut flag of each edge on that edge.
+func TestReverseKeepsEachCutFlagOnItsEdge(t *testing.T) {
+	pts := []point{{0, 0}, {10, 0}, {10, 10}, {5, 15}, {0, 10}}
+	r := ring{pts: slices.Clone(pts), cut: []bool{true, false, false, true, false}}
+	edges := map[[2]point]bool{}
+	for i := range pts {
+		edges[[2]point{pts[i], pts[(i+1)%len(pts)]}] = r.cut[i]
+	}
+	r.reverse()
+	if !slices.Equal(r.pts, []point{{0, 10}, {5, 15}, {10, 10}, {10, 0}, {0, 0}}) {
+		t.Fatalf("reversed points %v", r.pts)
+	}
+	for i := range r.pts {
+		a, b := r.pts[i], r.pts[(i+1)%len(r.pts)]
+		if r.cut[i] != edges[[2]point{b, a}] {
+			t.Errorf("edge %v-%v: cut %v, want %v as it was from %v to %v", a, b, r.cut[i], edges[[2]point{b, a}], b, a)
+		}
+	}
+}

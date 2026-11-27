@@ -414,7 +414,7 @@ func (t tileReader) prism(f feature, poly [][]tpoint) (*prism, bool) {
 		return nil, false
 	}
 	if area(outer.pts) < 0 {
-		outer = outer.reversed()
+		outer.reverse()
 	}
 	p := &prism{outer: outer}
 	for _, r := range poly[1:] {
@@ -423,7 +423,7 @@ func (t tileReader) prism(f feature, poly [][]tpoint) (*prism, bool) {
 			continue
 		}
 		if area(h.pts) > 0 {
-			h = h.reversed()
+			h.reverse()
 		}
 		p.holes = append(p.holes, h)
 	}

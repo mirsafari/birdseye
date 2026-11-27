@@ -31,20 +31,18 @@ func area[P point | tpoint](pts []P) float64 {
 	return s / 2
 }
 
-// reversed returns the ring running the other way, cut flags following
-// their edges.
-func (r ring) reversed() ring {
-	n := len(r.pts)
-	out := ring{pts: make([]point, n), cut: make([]bool, n)}
-	for i := range r.pts {
-		out.pts[i] = r.pts[n-1-i]
+// reverse turns the ring to run the other way, in place, its cut flags
+// following their edges: the edge from pts[i] to the next point was the
+// one from pts[n-2-i] to pts[n-1-i], so the flags are reversed and then
+// moved one place back.
+func (r ring) reverse() {
+	slices.Reverse(r.pts)
+	if n := len(r.cut); n > 1 {
+		slices.Reverse(r.cut)
+		first := r.cut[0]
+		copy(r.cut, r.cut[1:])
+		r.cut[n-1] = first
 	}
-	// The edge from out.pts[i] to out.pts[i+1] is the original edge from
-	// pts[n-2-i] to pts[n-1-i].
-	for i := range out.cut {
-		out.cut[i] = r.cut[((n-2-i)%n+n)%n]
-	}
-	return out
 }
 
 // northOf cuts the ring to the ground at or north of the line y (a
@@ -323,8 +321,9 @@ func clipPolygon[P point | tpoint](pts []P, n int, in func(k int, p P) bool, cro
 // segments that survive, joined into a piece for as long as each starts
 // where the one before it ended.
 type pieces[P point | tpoint] struct {
-	out [][]P
-	cur []P
+	out  [][]P
+	cur  []P
+	left int // the points of the line not yet looked at, the most a new piece can take
 }
 
 // add takes the part from a to b of the line's next segment. cutShort
@@ -332,7 +331,7 @@ type pieces[P point | tpoint] struct {
 func (c *pieces[P]) add(a, b P, cutShort bool) {
 	if len(c.cur) == 0 || c.cur[len(c.cur)-1] != a {
 		c.gap()
-		c.cur = []P{a}
+		c.cur = append(make([]P, 0, c.left+1), a)
 	}
 	c.cur = append(c.cur, b)
 	if cutShort {
@@ -360,6 +359,7 @@ func (c *pieces[P]) done() [][]P {
 func clipLineRect(pts []tpoint, size float64) [][]tpoint {
 	var kept pieces[tpoint]
 	for i := 0; i+1 < len(pts); i++ {
+		kept.left = len(pts) - i - 1
 		a, b := pts[i], pts[i+1]
 		t0, t1, ok := liangBarsky(a, b, size)
 		if !ok {
@@ -406,6 +406,7 @@ func clipLineCircle(pts []point, radius float64) [][]point {
 	var kept pieces[point]
 	r2 := radius * radius
 	for i := 0; i+1 < len(pts); i++ {
+		kept.left = len(pts) - i - 1
 		a, b := pts[i], pts[i+1]
 		dx, dy := b.x-a.x, b.y-a.y
 		A := dx*dx + dy*dy
