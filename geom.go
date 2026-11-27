@@ -463,17 +463,24 @@ func (d disc) within(pts []point) bool {
 	return true
 }
 
+// bbox is the points' bounding box.
+func bbox[P point | tpoint](pts []P) (lo, hi P) {
+	l, h := point{math.Inf(1), math.Inf(1)}, point{math.Inf(-1), math.Inf(-1)}
+	for _, q := range pts {
+		p := point(q)
+		l.x, l.y = min(l.x, p.x), min(l.y, p.y)
+		h.x, h.y = max(h.x, p.x), max(h.y, p.y)
+	}
+	return P(l), P(h)
+}
+
 // misses reports whether the points' box lies wholly outside the circle
 // of radius r around the pin, with a margin: nothing of them can reach a
 // window inside that circle, and every point clipping leaves lies in
 // their box (what Sutherland and Hodgman's algorithm keeps lies in the
 // convex hull of what it is given).
 func misses(pts []point, r float64) bool {
-	lo, hi := point{math.Inf(1), math.Inf(1)}, point{math.Inf(-1), math.Inf(-1)}
-	for _, p := range pts {
-		lo.x, lo.y = min(lo.x, p.x), min(lo.y, p.y)
-		hi.x, hi.y = max(hi.x, p.x), max(hi.y, p.y)
-	}
+	lo, hi := bbox(pts)
 	// The box's point nearest the pin.
 	nx, ny := max(lo.x, min(0, hi.x)), max(lo.y, min(0, hi.y))
 	return nx*nx+ny*ny > r*r*(1+1e-9)

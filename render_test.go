@@ -1176,3 +1176,42 @@ func TestTheDiscCutsAsClippingWould(t *testing.T) {
 	}
 	t.Logf("%d ground rings within the disc, %d missing it, %d clipped", within, missed, clipped)
 }
+
+// TestOnlyPolygonsThatCanDrawAreConverted: a feature near the pin can
+// hold a whole block's buildings (central Zagreb's scene was 10,591
+// footprints, out to 2 km, for a disc of 400 m). A polygon is converted
+// when its box meets the disc of the reach around the pin, or when it
+// reaches a side of its tile, where it may be one part of a footprint
+// cut in two whose other part is nearer.
+func TestOnlyPolygonsThatCanDrawAreConverted(t *testing.T) {
+	const extent = 4096
+	id := tileID{8900, 5900}
+	n := float64(int(1) << Zoom)
+	// The pin in the middle of the tile.
+	wx, wy := (float64(id.x)+0.5)/n, (float64(id.y)+0.5)/n
+	fr := newFrame(Pin{Lat: math.Atan(math.Sinh(math.Pi*(1-2*wy))) * 180 / math.Pi, Lng: wx*360 - 180})
+	tr := newTileReader(fr, id, extent, 460)
+	unit := tr.u * fr.scale // metres a tile unit
+	at := func(east, north, size float64) []tpoint {
+		c := fr.fromLocal(tr.ox, tr.oy, tr.u, point{east, north})
+		s := size / unit
+		return []tpoint{{c.x, c.y}, {c.x + s, c.y}, {c.x + s, c.y + s}, {c.x, c.y + s}}
+	}
+	cases := []struct {
+		name string
+		pts  []tpoint
+		want bool
+	}{
+		{"on the pin", at(0, 0, 10), true},
+		{"inside the reach", at(300, 300, 10), true},
+		{"in the square's corner, outside the disc", at(400, 400, 10), false},
+		{"far off", at(-800, 0, 10), false},
+		{"far off on the tile's west side", []tpoint{{0, 100}, {20, 100}, {20, 120}, {0, 120}}, true},
+		{"far off on the tile's south side", []tpoint{{100, extent - 20}, {120, extent - 20}, {120, extent}, {100, extent}}, true},
+	}
+	for _, c := range cases {
+		if got := tr.wanted(c.pts); got != c.want {
+			t.Errorf("%s: wanted = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

@@ -215,6 +215,8 @@ type tileReader struct {
 	extent    float64
 	lo, hi    tpoint // the square around the pin, in tile units
 	reach     float64
+	pin       tpoint  // the pin, in tile units
+	reach2    float64 // the square of reach in tile units, with a margin
 }
 
 func newTileReader(fr frame, id tileID, extent, reach float64) tileReader {
@@ -223,6 +225,9 @@ func newTileReader(fr frame, id tileID, extent, reach float64) tileReader {
 	a := fr.fromLocal(ox, oy, u, point{-reach, reach})
 	b := fr.fromLocal(ox, oy, u, point{reach, -reach})
 	t.lo, t.hi = a, b
+	t.pin = fr.fromLocal(ox, oy, u, point{})
+	r := reach / (u * fr.scale)
+	t.reach2 = r * r * (1 + 1e-9)
 	return t
 }
 
@@ -230,6 +235,23 @@ func newTileReader(fr frame, id tileID, extent, reach float64) tileReader {
 func (t tileReader) near(f feature) bool {
 	lo, hi, ok := f.bounds()
 	return ok && hi.x >= t.lo.x && lo.x <= t.hi.x && hi.y >= t.lo.y && lo.y <= t.hi.y
+}
+
+// wanted reports whether one polygon or line of a feature near the pin is
+// worth converting. A feature can hold many (Planetiler joins a block's
+// buildings into one), most of them far from the pin: a polygon whose box
+// misses the disc of radius reach around the pin can draw nothing there
+// and is left out, unless its box reaches a side of the tile, where it
+// may be one part of a footprint the tile edge cut, whose other part the
+// neighbouring tile has nearer the pin.
+func (t tileReader) wanted(pts []tpoint) bool {
+	lo, hi := bbox(pts)
+	if lo.x <= sideEps || lo.y <= sideEps || hi.x >= t.extent-sideEps || hi.y >= t.extent-sideEps {
+		return true
+	}
+	nx := max(lo.x, min(t.pin.x, hi.x)) - t.pin.x
+	ny := max(lo.y, min(t.pin.y, hi.y)) - t.pin.y
+	return nx*nx+ny*ny <= t.reach2
 }
 
 func (t tileReader) local(p tpoint) point { return t.fr.toLocal(t.ox, t.oy, t.u, p) }
@@ -281,6 +303,9 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 				return err
 			}
 			for _, poly := range polygons(paths) {
+				if !t.wanted(poly[0]) {
+					continue
+				}
 				if p, ok := t.prism(f, poly); ok {
 					sc.prisms = append(sc.prisms, p)
 				}
@@ -306,6 +331,9 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 				return err
 			}
 			for _, poly := range polygons(paths) {
+				if !t.wanted(poly[0]) {
+					continue
+				}
 				var rings [][]point
 				for i, r := range poly {
 					c, ok := t.clipped(r)
@@ -342,6 +370,9 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 				return err
 			}
 			for _, p := range paths {
+				if !t.wanted(p) {
+					continue
+				}
 				for _, part := range clipLineRect(p, t.extent) {
 					pts := make([]point, len(part))
 					for i, q := range part {
