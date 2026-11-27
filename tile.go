@@ -127,9 +127,10 @@ func (f frame) fromLocal(ox, oy, unit float64, p point) tpoint {
 	}
 }
 
-// maxTiles is the most tiles one picture reads. The widest disc of a pin
-// on the map takes 36 (at maxLatitude; 4 in Croatia), so only a radius
-// asked for through Options can reach it.
+// maxTiles is the most tiles one picture reads. A pin on the map takes at
+// most 36 at a place's own radius and 144 at WidestRadius (at
+// maxLatitude; 4 and 9 in Croatia), so no radius RenderWith lets through
+// reaches it: it bounds the list itself, whatever asks for it.
 const maxTiles = 256
 
 // tilesAround lists the tiles that cover a square of the given half-size

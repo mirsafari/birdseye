@@ -92,7 +92,7 @@ func one(args []string) error {
 	from := fs.String("tiles", "", "a PMTiles archive or a tiles directory (default: the fixtures)")
 	lat := fs.Float64("lat", 0, "latitude")
 	lng := fs.Float64("lng", 0, "longitude")
-	radius := fs.Float64("radius", 0, "radius in metres (0: the place's own)")
+	radius := fs.Float64("radius", 0, fmt.Sprintf("radius in metres, up to %.0f (0: the place's own)", birdseye.WidestRadius))
 	out := fs.String("o", "birdseye.svg", "the SVG to write")
 	_ = fs.Parse(args)
 	src, err := open(*from)

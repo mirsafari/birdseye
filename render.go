@@ -25,6 +25,15 @@ const (
 	MaxRadius = 400.0
 	BuiltArea = 25000.0
 
+	// WidestRadius is the widest Options.Radius drawn, in metres; a wider
+	// one is ErrTooWide. A drawing's time and size grow with the buildings
+	// in its disc: around central Zagreb, 730 of them at 400 m (21 ms, a
+	// 450 KB picture), 3,400 at 1,000 m (70 ms, 1.9 MB) and 22,000 at
+	// 3,000 m (half a second, 10 MB). No place's own radius is over
+	// MaxRadius; an app that takes a radius from outside checks it against
+	// this.
+	WidestRadius = 1000.0
+
 	// reachMargin is how far beyond the radius tiles are read, for the
 	// footprints whose centre is inside the disc and whose walls are not.
 	reachMargin = 60.0
@@ -34,9 +43,8 @@ var (
 	// ErrNoTiles is a pin outside the tiles, or off the map altogether
 	// (beyond Web Mercator's 85.05° north or south, or not a number).
 	ErrNoTiles = errors.New("birdseye: no tiles cover the pin")
-	// ErrTooWide is an Options.Radius that would take more tiles than one
-	// picture reads (some kilometres; no place's own radius comes near).
-	ErrTooWide = errors.New("birdseye: the radius takes too many tiles")
+	// ErrTooWide is an Options.Radius over WidestRadius.
+	ErrTooWide = errors.New("birdseye: the radius is too wide to draw")
 	// ErrTooSparse is a place with fewer than MinBuildings buildings in
 	// the disc: no picture, unless Options.DrawSparse asks for it.
 	ErrTooSparse = errors.New("birdseye: too few buildings around the pin")
@@ -44,8 +52,8 @@ var (
 
 // Options vary a picture; the zero value is the picture as designed.
 type Options struct {
-	// Radius in metres; zero is the place's own (placeRadius). One too
-	// wide to read is ErrTooWide.
+	// Radius in metres, up to WidestRadius; zero is the place's own
+	// (placeRadius). A wider one is ErrTooWide.
 	Radius float64
 	// DrawSparse draws a place of fewer than MinBuildings buildings too,
 	// in place of ErrTooSparse, for a tool that looks at such pictures;
@@ -79,6 +87,9 @@ func RenderWith(ctx context.Context, tiles Tiles, pin Pin, opts Options) (Pictur
 		return Picture{}, ErrNoTiles
 	}
 	radius := opts.Radius
+	if radius > WidestRadius {
+		return Picture{}, ErrTooWide
+	}
 	reach := MaxRadius + reachMargin
 	if radius > 0 {
 		reach = radius + reachMargin

@@ -666,11 +666,32 @@ func TestAPinOffTheMapHasNoPictureAndReadsNoTiles(t *testing.T) {
 	}
 }
 
-func TestARadiusTooWideToReadIsRefused(t *testing.T) {
+// TestARadiusTooWideIsRefused: a drawing's cost grows with its disc, so a
+// radius over WidestRadius is refused before a tile is read; the widest
+// one let through is drawn, from a list of tiles within the budget
+// wherever the pin is.
+func TestARadiusTooWideIsRefused(t *testing.T) {
 	pin := places[0].Pin
-	for _, radius := range []float64{1e6, 1e12, math.Inf(1)} {
-		if _, err := RenderWith(t.Context(), fixtures, pin, Options{Radius: radius}); !errors.Is(err, ErrTooWide) {
+	read := 0
+	counting := tilesFunc(func(ctx context.Context, z, x, y int) ([]byte, error) {
+		read++
+		return fixtures.Tile(ctx, z, x, y)
+	})
+	for _, radius := range []float64{WidestRadius + 1, 3000, 1e6, 1e12, math.Inf(1)} {
+		if _, err := RenderWith(t.Context(), counting, pin, Options{Radius: radius}); !errors.Is(err, ErrTooWide) {
 			t.Errorf("radius %v: %v, want ErrTooWide", radius, err)
+		}
+	}
+	if read != 0 {
+		t.Errorf("%d tiles were read for radii that are refused", read)
+	}
+	widest, err := RenderWith(t.Context(), counting, pin, Options{Radius: WidestRadius})
+	if err != nil || widest.Radius != WidestRadius || read == 0 {
+		t.Errorf("the widest radius: drawn %v m around after %d tiles (%v)", widest.Radius, read, err)
+	}
+	for _, at := range []Pin{pin, {maxLatitude, 16}, {-maxLatitude, 16}, {0, 0}} {
+		if n := len(tilesAround(newFrame(at), WidestRadius+reachMargin)); n == 0 || n > 144 {
+			t.Errorf("%v: the widest radius lists %d tiles, want some and at most 144", at, n)
 		}
 	}
 	if ids := tilesAround(newFrame(pin), 1e9); ids != nil {
