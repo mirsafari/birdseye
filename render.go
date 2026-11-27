@@ -79,9 +79,13 @@ type Picture struct {
 
 // Render draws the picture around a pin. With an error there is no
 // picture: ErrNoTiles and ErrTooSparse are places without one, the
-// context's error a drawing given up (between two tiles, or before the
+// context's error a drawing given up (between two tiles, or while the
 // picture is drawn from them), ErrTooComplex tiles past a drawing's
 // bounds, anything else a tile that could not be read.
+//
+// Render keeps nothing from one drawing to the next, so it is safe to call
+// from several goroutines at once, over one Tiles (which must be safe for
+// concurrent use itself).
 func Render(ctx context.Context, tiles Tiles, pin Pin) (Picture, error) {
 	return RenderWith(ctx, tiles, pin, Options{})
 }

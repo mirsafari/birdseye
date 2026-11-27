@@ -25,6 +25,13 @@ const earthRadius = 6378137.0
 // as a missing file is; bytes with no error are a tile, also when there
 // are none of them. A source that can wait (a network, a slow disk) gives
 // up with the context's error once the context is done.
+//
+// A source is safe for concurrent use: an app that draws more than one
+// pin at a time shares one source between the drawings, which call Tile
+// from their own goroutines (a drawing itself reads its tiles one after
+// another), and Render keeps the bytes it is given only while it draws.
+// DirTiles, FSTiles over a file system that is safe for concurrent use
+// (an embed.FS, os.DirFS) and a pmtiles.Reader are.
 type Tiles interface {
 	Tile(ctx context.Context, z, x, y int) ([]byte, error)
 }
