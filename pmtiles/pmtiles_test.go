@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io/fs"
+	"strings"
 	"testing"
 )
 
@@ -181,6 +182,22 @@ func gzipped(t *testing.T, b []byte) []byte {
 	_, _ = zw.Write(b)
 	_ = zw.Close()
 	return buf.Bytes()
+}
+
+// TestGunzipRefusesMoreThanTheLimit: a directory that unpacks to more
+// than a read takes is refused for its size, not cut at the limit and
+// then refused for whatever the cut made of its columns.
+func TestGunzipRefusesMoreThanTheLimit(t *testing.T) {
+	packed := gzipped(t, make([]byte, 100))
+	if got, err := gunzip(packed, 100); err != nil || len(got) != 100 {
+		t.Fatalf("100 bytes under a limit of 100 = %d bytes, %v", len(got), err)
+	}
+	if got, err := gunzip(packed, 99); err == nil || !strings.Contains(err.Error(), "more than 99 bytes") {
+		t.Fatalf("100 bytes under a limit of 99 = %d bytes, %v; want refused for its size", len(got), err)
+	}
+	if _, err := gunzip([]byte("not gzip"), 100); err == nil {
+		t.Fatal("bytes that are not gzip were unpacked")
+	}
 }
 
 func TestNewRefusesWhatItCannotRead(t *testing.T) {
