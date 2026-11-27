@@ -324,6 +324,16 @@ func TestHeights(t *testing.T) {
 	}
 }
 
+// mustDraw draws a scene.
+func mustDraw(t testing.TB, sc scene, radius float64) Picture {
+	t.Helper()
+	pic, err := draw(t.Context(), sc, radius)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pic
+}
+
 // box is a hand-made prism with its south-west corner at (x, y).
 func box(name string, x, y, w, d, h float64) *prism {
 	pts := []point{{x, y}, {x + w, y}, {x + w, y + d}, {x, y + d}}
@@ -343,7 +353,7 @@ func TestOrderDrawsFarBeforeNear(t *testing.T) {
 	foot := point{0, -520}
 	near, mid, far := box("near", -5, 0, 10, 10, 20), box("mid", -5, 30, 10, 10, 20), box("far", -5, 60, 10, 10, 20)
 	ps := []*prism{near, far, mid}
-	if cycles := order(ps, foot); cycles != 0 {
+	if cycles, err := order(t.Context(), ps, foot); cycles != 0 || err != nil {
 		t.Fatalf("cycles = %d", cycles)
 	}
 	if !(indexOf(ps, far) < indexOf(ps, mid) && indexOf(ps, mid) < indexOf(ps, near)) {
@@ -359,7 +369,7 @@ func TestOrderPutsABoxInsideAnLInFrontOfItsBackWing(t *testing.T) {
 	inner := box("inner", -10, 10, 15, 15, 30)
 	front := box("front", -10, -30, 15, 10, 5)
 	ps := []*prism{front, inner, l}
-	if cycles := order(ps, foot); cycles != 0 {
+	if cycles, err := order(t.Context(), ps, foot); cycles != 0 || err != nil {
 		t.Fatalf("cycles = %d", cycles)
 	}
 	if indexOf(ps, l) > indexOf(ps, inner) || indexOf(ps, inner) > indexOf(ps, front) {
@@ -379,7 +389,9 @@ func TestOrderDrawsAPavilionInACourtyardAfterTheFarWing(t *testing.T) {
 	far := box("far", -20, 140, 40, 20, 12)
 	pavilion := box("pavilion", -5, 40, 10, 10, 6)
 	ps := []*prism{pavilion, block, far}
-	order(ps, foot)
+	if _, err := order(t.Context(), ps, foot); err != nil {
+		t.Fatal(err)
+	}
 	if indexOf(ps, far) > indexOf(ps, block) {
 		t.Fatalf("far %d drawn after block %d", indexOf(ps, far), indexOf(ps, block))
 	}
@@ -793,7 +805,9 @@ func edgeScene(t *testing.T) scene {
 	if err := sc.add(fr, east, tile(0), 460); err != nil {
 		t.Fatal(err)
 	}
-	joinParts(sc.prisms)
+	if err := joinParts(t.Context(), sc.prisms, fr); err != nil {
+		t.Fatal(err)
+	}
 	evenHeights(sc.prisms)
 	if len(sc.prisms) != 6 {
 		t.Fatalf("%d prisms, want each building's two halves", len(sc.prisms))
@@ -844,7 +858,9 @@ func TestTheSidesOfACutBuildingAreOneHeight(t *testing.T) {
 	if w.z1 != 11 || e.z1 != 9.5 || !w.guessed || !e.guessed {
 		t.Fatalf("the tiles guess %v and %v m, want 11 and 9.5: the test shows nothing", w.z1, e.z1)
 	}
-	joinParts(sc.prisms)
+	if err := joinParts(t.Context(), sc.prisms, fr); err != nil {
+		t.Fatal(err)
+	}
 	evenHeights(sc.prisms)
 	if w.whole() != e.whole() {
 		t.Fatal("the two sides are not one building")
@@ -911,7 +927,7 @@ func TestNoRoofRisesPastTheCamera(t *testing.T) {
 				crown := box("", -5, tower.outer.pts[0].y, 10, 10, height+10)
 				crown.z0 = height
 				sc.prisms = append(sc.prisms, tower, crown)
-				pic := draw(sc, radius)
+				pic := mustDraw(t, sc, radius)
 				if pic.Pinned != pinned || pic.Buildings != 52 {
 					t.Fatalf("radius %v, %v m: pinned %v among %d buildings", radius, height, pic.Pinned, pic.Buildings)
 				}
@@ -956,7 +972,7 @@ func TestNoRoofRisesPastTheCamera(t *testing.T) {
 // drawn as any other building.
 func TestAFootprintCutByATileEdgeIsOneBuilding(t *testing.T) {
 	sc := edgeScene(t)
-	pic := draw(sc, MinRadius)
+	pic := mustDraw(t, sc, MinRadius)
 	if !pic.Pinned || pic.Buildings != 3 {
 		t.Fatalf("pinned %v, buildings %d, want the pinned shop among 3 buildings", pic.Pinned, pic.Buildings)
 	}
@@ -1020,7 +1036,7 @@ func TestABuildingDoesNotRunOnBehindTheCamera(t *testing.T) {
 	if c := centroid(pts); math.Hypot(c.x, c.y) > MinRadius {
 		t.Fatalf("the hall's centre %v is outside the disc", c)
 	}
-	pic := draw(scene{prisms: []*prism{hall}}, MinRadius)
+	pic := mustDraw(t, scene{prisms: []*prism{hall}}, MinRadius)
 	if pic.Buildings != 1 {
 		t.Fatalf("buildings = %d", pic.Buildings)
 	}
@@ -1299,5 +1315,102 @@ func TestReverseKeepsEachCutFlagOnItsEdge(t *testing.T) {
 		if r.cut[i] != edges[[2]point{b, a}] {
 			t.Errorf("edge %v-%v: cut %v, want %v as it was from %v to %v", a, b, r.cut[i], edges[[2]point{b, a}], b, a)
 		}
+	}
+}
+
+// TestJoinPartsJoinsWhatComparingEveryPairJoined: joinParts compares only
+// the cuts that overlap on one tile edge, and joins the footprints into
+// exactly the buildings comparing every pair of cut footprints did, in
+// every fixture place.
+func TestJoinPartsJoinsWhatComparingEveryPairJoined(t *testing.T) {
+	buildings := func(prisms []*prism) []int { // each prism's building, as the first prism of it
+		first := map[*prism]int{}
+		out := make([]int, len(prisms))
+		for i, p := range prisms {
+			if _, ok := first[p.whole()]; !ok {
+				first[p.whole()] = i
+			}
+			out[i] = first[p.whole()]
+		}
+		return out
+	}
+	joined := 0
+	for _, p := range places {
+		sc, _, err := loadScene(t.Context(), fixtures, p.Pin, WidestRadius+reachMargin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := buildings(sc.prisms)
+		for _, pr := range sc.prisms {
+			pr.of = nil
+		}
+		var cut []*prism
+		for _, pr := range sc.prisms {
+			if pr.outer.hasCut() {
+				cut = append(cut, pr)
+			}
+		}
+		for i, a := range cut {
+			for _, b := range cut[i+1:] {
+				if wa, wb := a.whole(), b.whole(); wa != wb && sameHeights(a, b) && sharesCut(a.outer, b.outer) {
+					wb.of = wa
+				}
+			}
+		}
+		want := buildings(sc.prisms)
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: joinParts makes other buildings than comparing every pair", p.Name)
+		}
+		for i, b := range want {
+			if b != i {
+				joined++
+			}
+		}
+	}
+	if joined == 0 {
+		t.Fatal("no fixture footprint is joined: the test compares nothing")
+	}
+}
+
+// TestJoiningAndOrderingAreBounded: footprints a hostile tile lays along
+// one tile edge, or in one line from the camera, make every pair one to
+// compare. Joining and ordering them give up once the context is done,
+// and refuse more of them than a drawing takes.
+func TestJoiningAndOrderingAreBounded(t *testing.T) {
+	fr := newFrame(Pin{45, 16})
+	along := func(n int) []*prism { // n footprints cut along one tile edge, all overlapping
+		out := make([]*prism, n)
+		for i := range out {
+			p := box("", 100, 0, 10, 10, 9)
+			p.outer.cut[1] = true // the east edge, at x = 110
+			out[i] = p
+		}
+		return out
+	}
+	done, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := joinParts(done, along(maxCutPrisms), fr); !errors.Is(err, context.Canceled) {
+		t.Errorf("joining with a context done: %v", err)
+	}
+	if err := joinParts(t.Context(), along(maxCutPrisms+1), fr); !errors.Is(err, ErrTooComplex) {
+		t.Errorf("joining %d footprints on tile edges: %v, want ErrTooComplex", maxCutPrisms+1, err)
+	}
+	if err := joinParts(t.Context(), along(100), fr); err != nil {
+		t.Errorf("joining a hundred: %v", err)
+	}
+
+	column := func(n int) []*prism { // n footprints north of the camera, one behind another
+		out := make([]*prism, n)
+		for i := range out {
+			out[i] = box("", -5, float64(i)*0.01, 10, 10, 9)
+		}
+		return out
+	}
+	foot := point{0, -520}
+	if _, err := order(done, column(2000), foot); !errors.Is(err, context.Canceled) {
+		t.Errorf("ordering with a context done: %v", err)
+	}
+	if _, err := order(t.Context(), column(3000), foot); !errors.Is(err, ErrTooComplex) {
+		t.Errorf("ordering %d footprints in one line: %v, want ErrTooComplex", 3000, err)
 	}
 }

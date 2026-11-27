@@ -109,10 +109,10 @@ func RenderWith(ctx context.Context, tiles Tiles, pin Pin, opts Options) (Pictur
 	if !(radius > 0) { // zero, negative or not a number
 		radius = placeRadius(sc.prisms)
 	}
-	if err := ctx.Err(); err != nil {
+	pic, err := draw(ctx, sc, radius)
+	if err != nil {
 		return Picture{}, err
 	}
-	pic := draw(sc, radius)
 	if pic.Buildings < MinBuildings && !opts.DrawSparse {
 		return Picture{}, ErrTooSparse
 	}
@@ -166,8 +166,12 @@ func footprint(p *prism) float64 {
 // draw cuts the scene to the disc, finds the pinned building, orders the prisms and
 // writes the picture. It cuts the scene's prisms in place (to the ground
 // north of southEdge, and to the height the camera can see, tallest), so
-// a scene is drawn once.
-func draw(sc scene, radius float64) Picture {
+// a scene is drawn once. It gives up with the context's error once the
+// context is done, before it starts or while it orders.
+func draw(ctx context.Context, sc scene, radius float64) (Picture, error) {
+	if err := ctx.Err(); err != nil {
+		return Picture{}, err
+	}
 	d := &drawing{disc: newDisc(radius)}
 	target := 0.0
 	guessed := 0
@@ -232,7 +236,11 @@ func draw(sc scene, radius float64) Picture {
 	}
 
 	cam := newCamera(radius, target)
-	d.cycles = order(d.prisms, cam.foot())
+	cycles, err := order(ctx, d.prisms, cam.foot())
+	if err != nil {
+		return Picture{}, err
+	}
+	d.cycles = cycles
 	svg := writeSVG(d, cam)
 	return Picture{
 		SVG:       svg,
@@ -242,7 +250,7 @@ func draw(sc scene, radius float64) Picture {
 		Cycles:    d.cycles,
 		Faces:     d.faces,
 		Pinned:    pinned,
-	}
+	}, nil
 }
 
 // holds reports whether the footprint, courtyards excluded, holds p.

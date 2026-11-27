@@ -1,6 +1,7 @@
 package birdseye
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -40,6 +41,18 @@ func (p *prism) whole() *prism {
 		p = p.of
 	}
 	return p
+}
+
+// root is whole, pointing every prism on the way straight at it, so
+// joining many parts stays quick however they were joined.
+func (p *prism) root() *prism {
+	r := p.whole()
+	for p.of != nil && p.of != r {
+		next := p.of
+		p.of = r
+		p = next
+	}
+	return r
 }
 
 // cutNorthOf cuts the prism to the ground north of the line y metres
@@ -159,7 +172,9 @@ func loadScene(ctx context.Context, src Tiles, pin Pin, reach float64) (scene, i
 			return sc, found, fmt.Errorf("birdseye: tile %d/%d/%d: %w", Zoom, id.x, id.y, err)
 		}
 	}
-	joinParts(sc.prisms)
+	if err := joinParts(ctx, sc.prisms, fr); err != nil {
+		return sc, found, err
+	}
 	evenHeights(sc.prisms)
 	return sc, found, nil
 }
@@ -173,21 +188,96 @@ func loadScene(ctx context.Context, src Tiles, pin Pin, reach float64) (scene, i
 // that ends on a tile edge meets the neighbour's cut at a point, not along
 // it; and the parts of a tower that stand over one another at different
 // heights stay the separate prisms they are away from a tile edge.
-func joinParts(prisms []*prism) {
-	var cut []*prism
+//
+// Only parts on the same tile edge, whose cuts overlap along it, can
+// belong together, so the cut edges are sorted by the tile edge they lie
+// on and along it, and only overlapping ones are compared: comparing
+// every pair of footprints on any tile edge took 13 seconds for a hostile
+// tile of 80,000 of them. It looks at the context as it goes.
+func joinParts(ctx context.Context, prisms []*prism, fr frame) error {
+	type edge struct {
+		northSouth bool  // a tile edge along a meridian: x is constant
+		at         int64 // which one, in tiles at Zoom from the world's west or north edge
+	}
+	type span struct {
+		p      *prism
+		lo, hi float64 // the extent of its cut along the tile edge, in metres
+	}
+	tiles := float64(int64(1) << Zoom)
+	var edges []edge
+	spans := map[edge][]span{}
+	cut := 0
 	for _, p := range prisms {
-		if p.outer.hasCut() {
-			cut = append(cut, p)
+		r := p.outer
+		if !r.hasCut() {
+			continue
+		}
+		if cut++; cut > maxCutPrisms {
+			return fmt.Errorf("%w: more than %d footprints on tile edges", ErrTooComplex, maxCutPrisms)
+		}
+		var mine []span // one per tile edge the footprint is cut along
+		var on []edge
+		n := len(r.pts)
+		for i, a := range r.pts {
+			if !r.cut[i] {
+				continue
+			}
+			b := r.pts[(i+1)%n]
+			var e edge
+			var lo, hi float64
+			switch {
+			case math.Abs(a.x-b.x) < cutEps && math.Abs(a.y-b.y) >= cutEps:
+				e = edge{true, int64(math.Round((a.x/fr.scale + fr.x0) * tiles))}
+				lo, hi = min(a.y, b.y), max(a.y, b.y)
+			case math.Abs(a.y-b.y) < cutEps && math.Abs(a.x-b.x) >= cutEps:
+				e = edge{false, int64(math.Round((fr.y0 - a.y/fr.scale) * tiles))}
+				lo, hi = min(a.x, b.x), max(a.x, b.x)
+			default: // no length along a tile edge: it covers nothing
+				continue
+			}
+			if k := slices.Index(on, e); k >= 0 {
+				mine[k].lo, mine[k].hi = min(mine[k].lo, lo), max(mine[k].hi, hi)
+				continue
+			}
+			on, mine = append(on, e), append(mine, span{p, lo, hi})
+		}
+		for k, e := range on {
+			if _, seen := spans[e]; !seen {
+				edges = append(edges, e)
+			}
+			spans[e] = append(spans[e], mine[k])
 		}
 	}
-	for i, p := range cut {
-		for _, q := range cut[i+1:] {
-			if a, b := p.whole(), q.whole(); a != b && sameHeights(p, q) && sharesCut(p.outer, q.outer) {
-				b.of = a
+	steps := 0
+	for _, e := range edges {
+		ss := spans[e]
+		slices.SortStableFunc(ss, func(a, b span) int { return cmp.Compare(a.lo, b.lo) })
+		for i, a := range ss {
+			for _, b := range ss[i+1:] {
+				if b.lo >= a.hi { // and so every one after it: they do not overlap
+					break
+				}
+				if steps++; steps%checkEvery == 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+				}
+				if ra, rb := a.p.root(), b.p.root(); ra != rb && sameHeights(a.p, b.p) && sharesCut(a.p.outer, b.p.outer) {
+					rb.of = ra
+				}
 			}
 		}
 	}
+	return nil
 }
+
+// maxCutPrisms is the most footprints on tile edges a scene joins. The
+// densest scene in Croatia has 515.
+const maxCutPrisms = 1 << 14
+
+// checkEvery is how many steps of a loop that can run long go between two
+// looks at the context.
+const checkEvery = 1024
 
 // sameHeights reports whether two prisms can be parts of one footprint:
 // they carry its heights. A guessed top may differ, since each tile

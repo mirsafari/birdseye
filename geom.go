@@ -76,6 +76,10 @@ func (r ring) northOf(y float64) (out ring, ok bool) {
 	return out, len(out.pts) >= 3
 }
 
+// cutEps is how near two points on a tile edge count as on one line, in
+// metres: the two tiles place their shared edge a few nanometres apart.
+const cutEps = 1e-3
+
 // sharesCut reports whether the two rings are parts of one footprint cut
 // by a tile edge: a cut edge of each lies on the same line (a tile edge
 // runs east or north) and one covers at least half of the other. Parts of
@@ -83,7 +87,7 @@ func (r ring) northOf(y float64) (out ring, ok bool) {
 // neighbours whose shared wall ends on the tile edge overlap by that
 // rounding at most.
 func sharesCut(a, b ring) bool {
-	const eps = 1e-3 // metres; the two tiles place their shared edge a few nanometres apart
+	const eps = cutEps
 	span := func(a0, a1, b0, b1 float64) (over, shorter float64) {
 		a0, a1 = min(a0, a1), max(a0, a1)
 		b0, b1 = min(b0, b1), max(b0, b1)
