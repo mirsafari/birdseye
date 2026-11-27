@@ -1452,3 +1452,55 @@ func TestJoiningAndOrderingAreBounded(t *testing.T) {
 		t.Errorf("ordering %d footprints in one line: %v, want ErrTooComplex", 3000, err)
 	}
 }
+
+// TestABuildingIsDrawnWholeOrNotAtAll: whether a building is in the disc
+// was decided part by part, by each part's centre, so a footprint a tile
+// edge cut in two near the disc's edge was drawn in part, the drawn
+// part's cut edge, without a wall, facing the camera. Every part of a
+// building in the disc is drawn, in every fixture place.
+func TestABuildingIsDrawnWholeOrNotAtAll(t *testing.T) {
+	across := 0
+	for _, p := range places {
+		sc, _, err := loadScene(t.Context(), fixtures, p.Pin, MaxRadius+reachMargin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, radius := range []float64{placeRadius(sc.prisms), 360} {
+			drawn := map[*prism]bool{}
+			for _, pr := range inDisc(sc.prisms, radius) {
+				drawn[pr] = true
+			}
+			type count struct{ parts, drawn, centred int }
+			buildings := map[*prism]*count{}
+			for _, pr := range sc.prisms {
+				c := buildings[pr.whole()]
+				if c == nil {
+					c = &count{}
+					buildings[pr.whole()] = c
+				}
+				c.parts++
+				if drawn[pr] {
+					c.drawn++
+				}
+				if m := centroid(pr.outer.pts); math.Hypot(m.x, m.y) <= radius {
+					c.centred++
+				}
+			}
+			for _, c := range buildings {
+				if c.drawn != 0 && c.drawn != c.parts {
+					t.Errorf("%s at %.0f m: a building of %d parts is drawn in %d", p.Name, radius, c.parts, c.drawn)
+				}
+				if (c.drawn > 0) != (c.centred > 0) {
+					t.Errorf("%s at %.0f m: a building with %d parts centred in the disc is drawn in %d", p.Name, radius, c.centred, c.drawn)
+				}
+				if c.centred > 0 && c.centred < c.parts {
+					across++
+				}
+			}
+		}
+	}
+	if across == 0 {
+		t.Fatal("no fixture building lies across the disc's edge: the test checks nothing")
+	}
+	t.Logf("%d buildings across the disc's edge, drawn whole", across)
+}

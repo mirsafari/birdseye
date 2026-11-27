@@ -11,7 +11,7 @@ import (
 const (
 	// StyleVersion changes whenever the same tiles and pin draw a different
 	// picture, so cached pictures are drawn again.
-	StyleVersion = 4
+	StyleVersion = 5
 
 	// MinBuildings is the fewest buildings worth a picture; with fewer
 	// Render answers ErrTooSparse, and a page is better off with an
@@ -179,11 +179,7 @@ func draw(ctx context.Context, sc scene, radius float64) (Picture, error) {
 	south := southEdge(radius)
 	top := tallest(radius)
 	buildings := map[*prism]bool{} // the buildings in the disc; true for the pinned one
-	for _, p := range sc.prisms {
-		c := centroid(p.outer.pts)
-		if math.Hypot(c.x, c.y) > radius {
-			continue
-		}
+	for _, p := range inDisc(sc.prisms, radius) {
 		holdsPin := holds(p, origin)
 		if !p.cutNorthOf(south) {
 			continue
@@ -251,6 +247,28 @@ func draw(ctx context.Context, sc scene, radius float64) (Picture, error) {
 		Faces:     d.faces,
 		Pinned:    pinned,
 	}, nil
+}
+
+// inDisc is the prisms of the buildings in the disc: a building is in it
+// when the centre of a part of it is, and then every part of it is drawn.
+// A footprint a tile edge cut in two is one building, drawn whole or not
+// at all: a part left out showed the camera the drawn part's cut edge,
+// which has no wall, as the missing front of a building at the disc's
+// edge.
+func inDisc(prisms []*prism, radius float64) []*prism {
+	in := map[*prism]bool{}
+	for _, p := range prisms {
+		if c := centroid(p.outer.pts); math.Hypot(c.x, c.y) <= radius {
+			in[p.whole()] = true
+		}
+	}
+	out := make([]*prism, 0, len(in))
+	for _, p := range prisms {
+		if in[p.whole()] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // holds reports whether the footprint, courtyards excluded, holds p.
