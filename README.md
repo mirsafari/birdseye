@@ -54,7 +54,7 @@ a drawing, the context, and how a tile source says a tile is missing.
 
 | Package | What |
 | --- | --- |
-| `birdseye` | `Render`, `RenderWith`, `Tiles`, `DirTiles`, `FSTiles`, `TilesFor`, `Stylesheet`, `ColorVariables`. Standard library only. |
+| `birdseye` | `Render`, `RenderWith`, `Tiles`, `DirTiles`, `FSTiles`, `TilesFor`, `Pin.OnMap` (with `MaxLatitude`), `Stylesheet`, `ColorVariables`. Standard library only. |
 | `birdseye/pmtiles` | Reads a PMTiles v3 archive from any `io.ReaderAt`: `Open(path)` for a file, `New(strings.NewReader(embedded))` for an archive in the binary. Standard library only. |
 | `birdseye/birdseyetest` | Fixtures for tests, birdseye's and an app's: the tiles around eleven places in Croatia (embedded, about 700 KB) and the places. |
 | `cmd/birdseye` | The dev tool: `one` draws a pin, `sheet` draws every fixture place into a page to judge the look, `cut` refreshes the fixtures from an archive. |

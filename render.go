@@ -41,7 +41,7 @@ const (
 
 var (
 	// ErrNoTiles is a pin outside the tiles, or off the map altogether
-	// (beyond Web Mercator's 85.05° north or south, or not a number).
+	// (not Pin.OnMap: beyond MaxLatitude north or south, or not a number).
 	ErrNoTiles = errors.New("birdseye: no tiles cover the pin")
 	// ErrTooWide is an Options.Radius over WidestRadius.
 	ErrTooWide = errors.New("birdseye: the radius is too wide to draw")
@@ -83,7 +83,7 @@ func Render(ctx context.Context, tiles Tiles, pin Pin) (Picture, error) {
 
 // RenderWith draws the picture with options.
 func RenderWith(ctx context.Context, tiles Tiles, pin Pin, opts Options) (Picture, error) {
-	if !pin.onMap() {
+	if !pin.OnMap() {
 		return Picture{}, ErrNoTiles
 	}
 	radius := opts.Radius
