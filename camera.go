@@ -55,3 +55,12 @@ func (c camera) scale() float64 { return c.f / math.Hypot(c.d, c.h) }
 // foot is where the camera stands on the ground; the back-to-front order
 // is judged from it.
 func (c camera) foot() point { return point{0, -c.d} }
+
+// southEdge is the line south of which no building is drawn, in metres
+// north of the pin (so a negative number): halfway between the disc's
+// edge and the camera's foot. The ground there is already below the
+// frame, and a footprint that ran on (a hall some hundred metres long,
+// its centre in the disc) would pass under and behind the camera, where
+// the projection turns it inside out and the back-to-front order, judged
+// from the foot, has no meaning.
+func southEdge(radius float64) float64 { return -radius * (1 + distanceRatio) / 2 }

@@ -19,15 +19,20 @@
 //   - Every colour is a CSS variable, --birdseye-ground, -road, -green,
 //     -water, -roof, -wall-1 to -wall-3 (lit to shaded), -edge, and the
 //     pinned building's -pinned-roof, -pinned-wall-1 to -3 and
-//     -pinned-edge. Stylesheet holds defaults that follow the reader's
-//     colour scheme; a page with a theme sets its own.
+//     -pinned-edge (ColorVariables lists them). Stylesheet holds defaults
+//     that follow the reader's colour scheme; a page with a theme sets its
+//     own.
 //   - The camera aims at the point above the pin (on the pinned
 //     building's roof when there is one), which lands at PinX and PinY of
 //     the picture, so an HTML marker placed there stands on the pin.
 //   - North is up. The same tiles, pin and StyleVersion give the same
 //     bytes, so a hash of the SVG is a cache key and an address version.
 //   - ErrNoTiles and ErrTooSparse say when there is no picture worth
-//     showing; a page then shows an ordinary map.
+//     showing, and none comes with them; a page then shows an ordinary
+//     map (Options.DrawSparse is for a tool that wants to look at a sparse
+//     place anyway). Any pin may be asked
+//     for: one off the map (towards a pole, or not a number) is
+//     ErrNoTiles, and no picture reads more than a few tiles.
 //
 // OpenStreetMap's data is under the ODbL and the OpenMapTiles schema under
 // CC-BY: a page showing the picture credits "© OpenMapTiles

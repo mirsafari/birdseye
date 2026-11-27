@@ -3,7 +3,6 @@ package pmtiles_test
 import (
 	"bytes"
 	"compress/gzip"
-	"errors"
 	"io"
 	"os"
 	"testing"
@@ -57,14 +56,16 @@ func TestPlanetilerArchiveDrawsWhatTheFixturesDraw(t *testing.T) {
 				differ++
 			}
 		}
-		a, errA := birdseye.Render(archive, p.Pin)
-		if errA != nil && !errors.Is(errA, birdseye.ErrTooSparse) {
-			t.Errorf("%s: %v", p.Name, errA)
+		// Every place is drawn, the sparse one too, so each has bytes to
+		// compare.
+		a, errA := birdseye.RenderWith(archive, p.Pin, birdseye.Options{DrawSparse: true})
+		if errA != nil || len(a.SVG) == 0 {
+			t.Errorf("%s: %d bytes, %v", p.Name, len(a.SVG), errA)
 		}
 		if exact {
-			b, errB := birdseye.Render(fixtures, p.Pin)
-			if !errors.Is(errA, errB) || !bytes.Equal(a.SVG, b.SVG) {
-				t.Errorf("%s: the archive draws %d bytes (%v), the fixtures %d (%v)", p.Name, len(a.SVG), errA, len(b.SVG), errB)
+			b, errB := birdseye.RenderWith(fixtures, p.Pin, birdseye.Options{DrawSparse: true})
+			if errB != nil || !bytes.Equal(a.SVG, b.SVG) {
+				t.Errorf("%s: the archive draws %d bytes, the fixtures %d (%v)", p.Name, len(a.SVG), len(b.SVG), errB)
 			}
 		}
 	}

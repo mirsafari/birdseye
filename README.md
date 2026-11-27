@@ -25,13 +25,14 @@ case errors.Is(err, birdseye.ErrNoTiles), errors.Is(err, birdseye.ErrTooSparse):
 case err != nil:
 	// a read error
 }
+// with an error there is no picture; otherwise
 // pic.SVG: about 40 to 330 KB, 8 to 56 KB gzipped; 1 to 16 ms to draw
 ```
 
 On the page:
 
 ```html
-<link rel="stylesheet" href="birdseye.css">   <!-- birdseye.Stylesheet -->
+<link rel="stylesheet" href="birdseye.css">   <!-- birdseye.Stylesheet() -->
 <div class="birdseye" style="position: relative">
   <svg viewBox="0 0 1600 1000"><use href="/where/you/serve/pic.svg#s"/></svg>
   <span style="position: absolute; left: 50%; top: 58%">your marker</span>  <!-- PinX, PinY -->
@@ -49,7 +50,7 @@ pin lands, and when there is no picture.
 
 | Package | What |
 | --- | --- |
-| `birdseye` | `Render`, `RenderWith`, `Tiles`, `DirTiles`, `FSTiles`, `TilesFor`, `Stylesheet`, `Colors`. Standard library only. |
+| `birdseye` | `Render`, `RenderWith`, `Tiles`, `DirTiles`, `FSTiles`, `TilesFor`, `Stylesheet`, `ColorVariables`. Standard library only. |
 | `birdseye/pmtiles` | Reads a PMTiles v3 archive from any `io.ReaderAt`: `Open(path)` for a file, `New(strings.NewReader(embedded))` for an archive in the binary. Standard library only. |
 | `birdseye/birdseyetest` | Fixtures for tests, birdseye's and an app's: the tiles around eleven places in Croatia (embedded, about 700 KB) and the places. |
 | `cmd/birdseye` | The dev tool: `one` draws a pin, `sheet` draws every fixture place into a page to judge the look, `cut` refreshes the fixtures from an archive. |

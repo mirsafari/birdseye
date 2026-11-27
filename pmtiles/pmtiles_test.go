@@ -174,3 +174,24 @@ func TestNewRefusesWhatItCannotRead(t *testing.T) {
 		t.Error("a short file was accepted")
 	}
 }
+
+func TestDecodeDirectoryRefusesWhatCannotBe(t *testing.T) {
+	good := encodeDirectory([]entry{{tileID: 5, offset: 0, length: 3, runLength: 1}})
+	if es, err := decodeDirectory(good); err != nil || len(es) != 1 || es[0].offset != 0 {
+		t.Fatalf("a good directory: %v, %v", es, err)
+	}
+	// One entry whose offset column says "right after the previous
+	// entry's bytes": there is no previous entry.
+	noOffset := []byte{1, 5, 1, 3, 0}
+	if _, err := decodeDirectory(noOffset); err == nil {
+		t.Error("a first entry without an offset was accepted")
+	}
+	// More entries than the bytes can hold, at four bytes an entry.
+	if _, err := decodeDirectory(append([]byte{3}, make([]byte, 8)...)); err == nil {
+		t.Error("three entries in nine bytes were accepted")
+	}
+	// A column that ends early.
+	if _, err := decodeDirectory(good[:len(good)-1]); err == nil {
+		t.Error("a truncated directory was accepted")
+	}
+}

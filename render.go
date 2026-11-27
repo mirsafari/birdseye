@@ -9,9 +9,9 @@ import (
 const (
 	// StyleVersion changes whenever the same tiles and pin draw a different
 	// picture, so cached pictures are drawn again.
-	StyleVersion = 2
+	StyleVersion = 3
 
-	// MinBuildings is the fewest footprints worth a picture; with fewer
+	// MinBuildings is the fewest buildings worth a picture; with fewer
 	// Render answers ErrTooSparse, and a page is better off with an
 	// ordinary map.
 	MinBuildings = 40
@@ -29,37 +29,51 @@ const (
 )
 
 var (
-	// ErrNoTiles is a pin outside the tiles.
+	// ErrNoTiles is a pin outside the tiles, or off the map altogether
+	// (beyond Web Mercator's 85.05° north or south, or not a number).
 	ErrNoTiles = errors.New("birdseye: no tiles cover the pin")
-	// ErrTooSparse is a place with fewer than MinBuildings footprints in
-	// the disc. The picture comes back anyway, for a dev tool to look at.
+	// ErrTooWide is an Options.Radius that would take more tiles than one
+	// picture reads (some kilometres; no place's own radius comes near).
+	ErrTooWide = errors.New("birdseye: the radius takes too many tiles")
+	// ErrTooSparse is a place with fewer than MinBuildings buildings in
+	// the disc: no picture, unless Options.DrawSparse asks for it.
 	ErrTooSparse = errors.New("birdseye: too few buildings around the pin")
 )
 
 // Options vary a picture; the zero value is the picture as designed.
 type Options struct {
-	// Radius in metres; zero is the place's own (placeRadius).
+	// Radius in metres; zero is the place's own (placeRadius). One too
+	// wide to read is ErrTooWide.
 	Radius float64
+	// DrawSparse draws a place of fewer than MinBuildings buildings too,
+	// in place of ErrTooSparse, for a tool that looks at such pictures;
+	// Picture.Buildings says how many it has.
+	DrawSparse bool
 }
 
 // Picture is a rendered picture and what went into it.
 type Picture struct {
 	SVG       []byte
 	Radius    float64
-	Buildings int  // prisms drawn
+	Buildings int  // buildings drawn; a footprint a tile edge cuts in two counts once
 	Guessed   int  // of which the height was guessed
 	Cycles    int  // order cycles broken
 	Faces     int  // walls and roofs drawn
 	Pinned    bool // a footprint holds the pin: the pinned building, in the --birdseye-pinned-* colours
 }
 
-// Render draws the picture around a pin.
+// Render draws the picture around a pin. With an error there is no
+// picture: ErrNoTiles and ErrTooSparse are places without one, anything
+// else a tile that could not be read.
 func Render(tiles Tiles, pin Pin) (Picture, error) {
 	return RenderWith(tiles, pin, Options{})
 }
 
 // RenderWith draws the picture with options.
 func RenderWith(tiles Tiles, pin Pin, opts Options) (Picture, error) {
+	if !pin.onMap() {
+		return Picture{}, ErrNoTiles
+	}
 	radius := opts.Radius
 	reach := MaxRadius + reachMargin
 	if radius > 0 {
@@ -72,12 +86,12 @@ func RenderWith(tiles Tiles, pin Pin, opts Options) (Picture, error) {
 	if found == 0 {
 		return Picture{}, ErrNoTiles
 	}
-	if radius <= 0 {
+	if !(radius > 0) { // zero, negative or not a number
 		radius = placeRadius(sc.prisms)
 	}
 	pic := draw(sc, radius)
-	if pic.Buildings < MinBuildings {
-		return pic, ErrTooSparse
+	if pic.Buildings < MinBuildings && !opts.DrawSparse {
+		return Picture{}, ErrTooSparse
 	}
 	return pic, nil
 }
@@ -88,19 +102,25 @@ func RenderWith(tiles Tiles, pin Pin, opts Options) (Picture, error) {
 // close and a village wider. The built area, not a count of buildings,
 // decides, so a quarter of large blocks is drawn as close as an old town
 // of small houses; the count keeps a lone hall from being drawn alone.
+// The parts of a footprint a tile edge cut count as the one building.
 func placeRadius(prisms []*prism) float64 {
-	type near struct{ dist, area float64 }
+	type near struct {
+		dist, area float64
+		building   *prism
+	}
 	ns := make([]near, len(prisms))
 	for i, p := range prisms {
 		c := centroid(p.outer.pts)
-		ns[i] = near{math.Hypot(c.x, c.y), footprint(p)}
+		ns[i] = near{math.Hypot(c.x, c.y), footprint(p), p.whole()}
 	}
 	sort.Slice(ns, func(i, j int) bool { return ns[i].dist < ns[j].dist })
 	r := MaxRadius
 	built := 0.0
-	for i, n := range ns {
+	buildings := map[*prism]bool{}
+	for _, n := range ns {
 		built += n.area
-		if built >= BuiltArea && i+1 >= MinBuildings {
+		buildings[n.building] = true
+		if built >= BuiltArea && len(buildings) >= MinBuildings {
 			r = n.dist
 			break
 		}
@@ -119,27 +139,41 @@ func footprint(p *prism) float64 {
 }
 
 // draw cuts the scene to the disc, finds the pinned building, orders the prisms and
-// writes the picture.
+// writes the picture. It cuts the scene's prisms in place, so a scene is
+// drawn once.
 func draw(sc scene, radius float64) Picture {
 	d := &drawing{radius: radius}
 	target := 0.0
-	pinned := false
 	guessed := 0
 	origin := point{}
+	south := southEdge(radius)
+	buildings := map[*prism]bool{} // the buildings in the disc; true for the pinned one
 	for _, p := range sc.prisms {
 		c := centroid(p.outer.pts)
 		if math.Hypot(c.x, c.y) > radius {
 			continue
 		}
-		p.pinned = holds(p, origin)
-		if p.pinned {
-			pinned = true
+		holdsPin := holds(p, origin)
+		if !p.cutNorthOf(south) {
+			continue
+		}
+		if holdsPin {
 			target = math.Max(target, p.z1)
 		}
-		if p.guessed {
+		b := p.whole()
+		if _, seen := buildings[b]; !seen && p.guessed {
 			guessed++
 		}
+		buildings[b] = buildings[b] || holdsPin
 		d.prisms = append(d.prisms, p)
+	}
+	// The pinned building is drawn whole: every part of the footprint
+	// that holds the pin, not only the part on the pin's side of a tile
+	// edge.
+	pinned := false
+	for _, p := range d.prisms {
+		p.pinned = buildings[p.whole()]
+		pinned = pinned || p.pinned
 	}
 
 	// Ground polygons and lines are cut to the disc; the polygon window
@@ -177,7 +211,7 @@ func draw(sc scene, radius float64) Picture {
 	return Picture{
 		SVG:       svg,
 		Radius:    radius,
-		Buildings: len(d.prisms),
+		Buildings: len(buildings),
 		Guessed:   guessed,
 		Cycles:    d.cycles,
 		Faces:     d.faces,

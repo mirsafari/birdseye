@@ -24,6 +24,9 @@ func TestFixturesDrawEveryPlace(t *testing.T) {
 		if pic.Pinned != (p.Name == "split-riva") {
 			t.Errorf("%s: pinned = %v", p.Name, pic.Pinned)
 		}
+		if last == (len(pic.SVG) > 0) {
+			t.Errorf("%s: %d bytes with %v", p.Name, len(pic.SVG), err)
+		}
 	}
 	if birdseyetest.Named("varazdin-centre") != birdseyetest.Places[2] {
 		t.Error("Named does not find Varaždin")

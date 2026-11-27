@@ -143,18 +143,36 @@ func (f feature) bounds() (lo, hi tpoint, ok bool) {
 
 func zigzag(v uint32) int64 { return int64(v>>1) ^ -int64(v&1) }
 
+// maxTileBytes bounds a tile once unpacked (a zoom-14 tile of a city is a
+// megabyte or two), so a few kilobytes of gzip cannot ask for gigabytes.
+const maxTileBytes = 64 << 20
+
+// gunzip unpacks data when it is gzipped and refuses more than limit
+// bytes of it.
+func gunzip(data []byte, limit int) ([]byte, error) {
+	if len(data) <= 2 || data[0] != 0x1f || data[1] != 0x8b {
+		return data, nil
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("birdseye: gunzip tile: %w", err)
+	}
+	out, err := io.ReadAll(io.LimitReader(zr, int64(limit)+1))
+	if err != nil {
+		return nil, fmt.Errorf("birdseye: gunzip tile: %w", err)
+	}
+	if len(out) > limit {
+		return nil, fmt.Errorf("birdseye: gunzip tile: more than %d bytes", limit)
+	}
+	return out, nil
+}
+
 // decodeTile reads the named layers of a tile, gzipped or not. A layer
 // missing from the tile is missing from the map.
 func decodeTile(data []byte, wanted map[string]bool) (map[string]*layer, error) {
-	if len(data) > 2 && data[0] == 0x1f && data[1] == 0x8b {
-		zr, err := gzip.NewReader(bytes.NewReader(data))
-		if err != nil {
-			return nil, fmt.Errorf("birdseye: gunzip tile: %w", err)
-		}
-		data, err = io.ReadAll(zr)
-		if err != nil {
-			return nil, fmt.Errorf("birdseye: gunzip tile: %w", err)
-		}
+	data, err := gunzip(data, maxTileBytes)
+	if err != nil {
+		return nil, err
 	}
 	layers := map[string]*layer{}
 	p := pbuf{b: data}
@@ -246,6 +264,9 @@ func decodeLayer(data []byte, wanted map[string]bool) (string, *layer, error) {
 	if !wanted[name] {
 		return name, nil, nil
 	}
+	if extent == 0 { // every position would divide by it
+		return "", nil, errMalformed
+	}
 	l := &layer{extent: extent, features: make([]feature, 0, len(features))}
 	for _, raw := range features {
 		f, err := decodeFeature(raw, keys, values)
@@ -272,8 +293,10 @@ func decodeFeature(data []byte, keys []string, values []any) (feature, error) {
 				return f, err
 			}
 			for i := 0; i+1 < len(tags); i += 2 {
-				k, v := int(tags[i]), int(tags[i+1])
-				if k >= len(keys) || v >= len(values) {
+				// Compared unsigned: as an int, an index past 2³¹ is
+				// negative where int has 32 bits.
+				k, v := tags[i], tags[i+1]
+				if uint64(k) >= uint64(len(keys)) || uint64(v) >= uint64(len(values)) {
 					return f, errMalformed
 				}
 				f.props[keys[k]] = values[v]

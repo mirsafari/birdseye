@@ -266,7 +266,7 @@ func decodeDirectory(b []byte) ([]entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("directory: %w", err)
 	}
-	if n > uint64(len(b)) { // every entry takes at least four bytes
+	if n > uint64(len(b))/4 { // every entry takes at least four bytes, one a column
 		return nil, fmt.Errorf("directory: %d entries in %d bytes", n, len(b))
 	}
 	entries := make([]entry, n)
@@ -291,10 +291,13 @@ func decodeDirectory(b []byte) ([]entry, error) {
 	}
 	for i := range entries {
 		v := next()
-		if v == 0 && i > 0 {
-			entries[i].offset = entries[i-1].offset + uint64(entries[i-1].length)
-		} else {
+		switch {
+		case v > 0:
 			entries[i].offset = v - 1
+		case i > 0:
+			entries[i].offset = entries[i-1].offset + uint64(entries[i-1].length)
+		case err == nil: // nothing precedes the first entry
+			err = errors.New("the first entry has no offset")
 		}
 	}
 	if err != nil {

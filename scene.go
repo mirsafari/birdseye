@@ -19,9 +19,42 @@ type prism struct {
 	guessed bool
 	pinned  bool
 
+	// of is the prism this one is a part of, when a tile edge cut their
+	// footprint in two (joinParts); nil for a footprint in one piece and
+	// for the part the others are counted with.
+	of *prism
+
 	// The back-to-front order's working values.
 	dist     float64
 	az0, az1 float64
+}
+
+// whole is the prism that stands for the building: the prism itself, or
+// the part its footprint's other parts were joined to.
+func (p *prism) whole() *prism {
+	for p.of != nil {
+		p = p.of
+	}
+	return p
+}
+
+// cutNorthOf cuts the prism to the ground north of the line y metres
+// north of the pin (camera.go's southEdge) and reports whether anything is
+// left of it.
+func (p *prism) cutNorthOf(y float64) bool {
+	outer, ok := p.outer.northOf(y)
+	if !ok {
+		return false
+	}
+	p.outer = outer
+	holes := p.holes[:0]
+	for _, h := range p.holes {
+		if h, ok := h.northOf(y); ok {
+			holes = append(holes, h)
+		}
+	}
+	p.holes = holes
+	return true
 }
 
 // patchKind is what a ground polygon is, in drawing order.
@@ -63,27 +96,67 @@ type scene struct {
 }
 
 // loadScene reads the tiles that cover a square of half-size reach around
-// the pin. tiles is how many of them exist.
-func loadScene(src Tiles, pin Pin, reach float64) (sc scene, tiles int, err error) {
+// the pin, and how many of them exist. A reach that takes more tiles than
+// a picture reads is ErrTooWide.
+func loadScene(src Tiles, pin Pin, reach float64) (scene, int, error) {
+	var sc scene
+	found := 0
 	fr := newFrame(pin)
-	for _, id := range tilesAround(fr, reach) {
+	ids := tilesAround(fr, reach)
+	if ids == nil {
+		return sc, 0, ErrTooWide
+	}
+	for _, id := range ids {
 		data, err := src.Tile(Zoom, id.x, id.y)
 		if err != nil {
-			return sc, tiles, fmt.Errorf("birdseye: tile %d/%d/%d: %w", Zoom, id.x, id.y, err)
+			return sc, found, fmt.Errorf("birdseye: tile %d/%d/%d: %w", Zoom, id.x, id.y, err)
 		}
 		if data == nil {
 			continue
 		}
-		tiles++
+		found++
 		ls, err := decodeTile(data, layers)
 		if err != nil {
-			return sc, tiles, fmt.Errorf("birdseye: tile %d/%d/%d: %w", Zoom, id.x, id.y, err)
+			return sc, found, fmt.Errorf("birdseye: tile %d/%d/%d: %w", Zoom, id.x, id.y, err)
 		}
 		if err := sc.add(fr, id, ls, reach); err != nil {
-			return sc, tiles, fmt.Errorf("birdseye: tile %d/%d/%d: %w", Zoom, id.x, id.y, err)
+			return sc, found, fmt.Errorf("birdseye: tile %d/%d/%d: %w", Zoom, id.x, id.y, err)
 		}
 	}
-	return sc, tiles, nil
+	joinParts(sc.prisms)
+	return sc, found, nil
+}
+
+// joinParts finds the footprints a tile edge cut in two (each tile draws
+// its own side, so the building is drawn once and without a seam) and
+// makes them one building again for what is said of a building as a
+// whole: that it is the pinned one, and that it counts as one. Two parts
+// belong together when they stand as high as one another and cut edges of
+// theirs lie on one tile edge and mostly cover one another. A party wall
+// that ends on a tile edge meets the neighbour's cut at a point, not along
+// it; and the parts of a tower that stand over one another at different
+// heights stay the separate prisms they are away from a tile edge.
+func joinParts(prisms []*prism) {
+	var cut []*prism
+	for _, p := range prisms {
+		if p.outer.hasCut() {
+			cut = append(cut, p)
+		}
+	}
+	for i, p := range cut {
+		for _, q := range cut[i+1:] {
+			if a, b := p.whole(), q.whole(); a != b && sameHeights(p, q) && sharesCut(p.outer, q.outer) {
+				b.of = a
+			}
+		}
+	}
+}
+
+// sameHeights reports whether two prisms can be parts of one footprint:
+// they carry its heights. A guessed top may differ, since each tile
+// guesses from as much of the footprint as it carries.
+func sameHeights(p, q *prism) bool {
+	return p.z0 == q.z0 && (p.z1 == q.z1 || p.guessed && q.guessed)
 }
 
 // tileReader converts one tile's features to metres and keeps those that
