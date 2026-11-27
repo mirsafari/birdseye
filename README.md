@@ -5,6 +5,16 @@ from their OpenStreetMap footprints and seen from above at an angle, over
 the parks, water and roads, as one small SVG a web page colours with its
 own theme. The building under the pin is drawn in the accent colour.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/birdseye-dark.png">
+  <img alt="Two pictures drawn by birdseye: Split's old town with the octagonal building under the pin in the accent colour, and Komiža's harbour" src="docs/birdseye-light.png">
+</picture>
+
+Each picture is one SVG of 40 to 330 KB and takes milliseconds to draw. The
+colours come from the page's CSS, so the same file follows light and dark
+mode (switch GitHub's theme to see the other one), and the marker is the
+page's own HTML at a fixed point. `scripts/screenshot.sh` redraws these.
+
 ```go
 archive, err := pmtiles.Open("croatia-z14.pmtiles")
 // ...
