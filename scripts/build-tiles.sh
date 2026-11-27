@@ -11,7 +11,11 @@ set -euo pipefail
 
 area="${1:-croatia}"
 out="${2:-dist}"
-image="${PLANETILER_IMAGE:-ghcr.io/onthegomap/planetiler:0.10.2}"
+# Planetiler 0.10.3-SNAPSHOT (e59e1e3, built 2026-11-24), pinned by digest:
+# the build the fixtures came from. 0.10.2, the last release, has no
+# --download=streaming, which reads the world's water polygons for the area
+# alone instead of downloading all 900 MB of them.
+image="${PLANETILER_IMAGE:-ghcr.io/onthegomap/planetiler@sha256:bde2424546edfa40460bdd1c40c19d54e3af332b25d16c6db9d980ca3355623d}"
 name="${area}-z14.pmtiles"
 
 mkdir -p "$out"
