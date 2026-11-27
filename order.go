@@ -3,12 +3,16 @@ package birdseye
 import (
 	"cmp"
 	"container/heap"
+	"context"
+	"fmt"
 	"math"
 	"slices"
 )
 
 // order sorts the prisms back to front for the painter, and returns how
-// many cycles it had to break.
+// many cycles it had to break. Its pairs are bounded (maxOrderPairs) and
+// it looks at the context as it goes: prisms whose azimuths all overlap
+// make every pair one to look at.
 //
 // Two prisms can only hide one another where their azimuths, seen from
 // the camera's foot, overlap. There three rays are cast along the ground
@@ -16,7 +20,7 @@ import (
 // pairs make a graph, sorted topologically with the farthest prism first
 // among those free to go; a cycle (rare: two wings of one building around
 // another) is broken by releasing the farthest prism left.
-func order(prisms []*prism, foot point) int {
+func order(ctx context.Context, prisms []*prism, foot point) (int, error) {
 	n := len(prisms)
 	for _, p := range prisms {
 		lo, hi := math.Inf(1), math.Inf(-1)
@@ -36,12 +40,21 @@ func order(prisms []*prism, foot point) int {
 
 	after := make([][]int, n) // after[i]: the prisms drawn after i
 	indeg := make([]int, n)
+	pairs := 0
 	for k, i := range idx {
 		pi := prisms[i]
 		for _, j := range idx[k+1:] {
 			pj := prisms[j]
 			if pj.az0 >= pi.az1 {
 				break
+			}
+			if pairs++; pairs > maxOrderPairs {
+				return 0, fmt.Errorf("%w: more than %d pairs to order", ErrTooComplex, maxOrderPairs)
+			}
+			if pairs%checkEvery == 0 {
+				if err := ctx.Err(); err != nil {
+					return 0, err
+				}
 			}
 			lo, hi := max(pi.az0, pj.az0), min(pi.az1, pj.az1)
 			if hi-lo < 1e-5 {
@@ -83,6 +96,9 @@ func order(prisms []*prism, foot point) int {
 	cycles := 0
 	for len(out) < n {
 		if ready.Len() == 0 {
+			if err := ctx.Err(); err != nil { // each break looks at every prism left
+				return 0, err
+			}
 			best := -1
 			for i := range prisms {
 				if !done[i] && (best < 0 || prisms[i].dist > prisms[best].dist) {
@@ -107,8 +123,12 @@ func order(prisms []*prism, foot point) int {
 		}
 	}
 	copy(prisms, out)
-	return cycles
+	return cycles, nil
 }
+
+// maxOrderPairs is the most pairs of prisms order looks at. The densest
+// drawing in Croatia (central Zagreb at WidestRadius) looks at 151,000.
+const maxOrderPairs = 1 << 22
 
 // rayHit is the ground distance from the foot at which a ray of the given
 // azimuth (clockwise from north) first crosses the ring.

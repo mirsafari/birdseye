@@ -1,8 +1,10 @@
 package birdseye
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -23,6 +25,13 @@ const earthRadius = 6378137.0
 // as a missing file is; bytes with no error are a tile, also when there
 // are none of them. A source that can wait (a network, a slow disk) gives
 // up with the context's error once the context is done.
+//
+// A source is safe for concurrent use: an app that draws more than one
+// pin at a time shares one source between the drawings, which call Tile
+// from their own goroutines (a drawing itself reads its tiles one after
+// another), and Render keeps the bytes it is given only while it draws.
+// DirTiles, FSTiles over a file system that is safe for concurrent use
+// (an embed.FS, os.DirFS) and a pmtiles.Reader are.
 type Tiles interface {
 	Tile(ctx context.Context, z, x, y int) ([]byte, error)
 }
@@ -37,12 +46,32 @@ func DirTiles(dir string) Tiles { return fsTiles{os.DirFS(dir)} }
 type fsTiles struct{ fsys fs.FS }
 
 // Tile reads one tile file; a missing file is a missing tile, in the
-// file system's own words.
+// file system's own words. A file larger than any tile is refused before
+// it is read.
 func (t fsTiles) Tile(ctx context.Context, z, x, y int) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return fs.ReadFile(t.fsys, fmt.Sprintf("%d-%d-%d.pbf", z, x, y))
+	name := fmt.Sprintf("%d-%d-%d.pbf", z, x, y)
+	f, err := t.fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var buf bytes.Buffer
+	if info, err := f.Stat(); err == nil {
+		if info.Size() > maxTileBytes {
+			return nil, fmt.Errorf("birdseye: tile file %s of %d bytes, more than %d", name, info.Size(), maxTileBytes)
+		}
+		buf.Grow(int(info.Size()) + bytes.MinRead)
+	}
+	if _, err := buf.ReadFrom(io.LimitReader(f, maxTileBytes+1)); err != nil {
+		return nil, err
+	}
+	if buf.Len() > maxTileBytes {
+		return nil, fmt.Errorf("birdseye: tile file %s: more than %d bytes", name, maxTileBytes)
+	}
+	return buf.Bytes(), nil
 }
 
 // TilesFor lists the tiles (z, x, y) a picture of the pin can read: every

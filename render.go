@@ -11,7 +11,7 @@ import (
 const (
 	// StyleVersion changes whenever the same tiles and pin draw a different
 	// picture, so cached pictures are drawn again.
-	StyleVersion = 4
+	StyleVersion = 5
 
 	// MinBuildings is the fewest buildings worth a picture; with fewer
 	// Render answers ErrTooSparse, and a page is better off with an
@@ -48,6 +48,11 @@ var (
 	// ErrTooSparse is a place with fewer than MinBuildings buildings in
 	// the disc: no picture, unless Options.DrawSparse asks for it.
 	ErrTooSparse = errors.New("birdseye: too few buildings around the pin")
+	// ErrTooComplex is tiles that hold more around the pin than any place
+	// does, past one of the bounds a drawing keeps to so that its time
+	// and memory stay bounded: broken or hostile tiles, never a real map
+	// (the densest place in Croatia uses a seventh of the points allowed).
+	ErrTooComplex = errors.New("birdseye: the tiles hold too much around the pin to draw")
 )
 
 // Options vary a picture; the zero value is the picture as designed.
@@ -74,9 +79,13 @@ type Picture struct {
 
 // Render draws the picture around a pin. With an error there is no
 // picture: ErrNoTiles and ErrTooSparse are places without one, the
-// context's error a drawing given up (between two tiles, or before the
-// picture is drawn from them), anything else a tile that could not be
-// read.
+// context's error a drawing given up (between two tiles, or while the
+// picture is drawn from them), ErrTooComplex tiles past a drawing's
+// bounds, anything else a tile that could not be read.
+//
+// Render keeps nothing from one drawing to the next, so it is safe to call
+// from several goroutines at once, over one Tiles (which must be safe for
+// concurrent use itself).
 func Render(ctx context.Context, tiles Tiles, pin Pin) (Picture, error) {
 	return RenderWith(ctx, tiles, pin, Options{})
 }
@@ -104,10 +113,10 @@ func RenderWith(ctx context.Context, tiles Tiles, pin Pin, opts Options) (Pictur
 	if !(radius > 0) { // zero, negative or not a number
 		radius = placeRadius(sc.prisms)
 	}
-	if err := ctx.Err(); err != nil {
+	pic, err := draw(ctx, sc, radius)
+	if err != nil {
 		return Picture{}, err
 	}
-	pic := draw(sc, radius)
 	if pic.Buildings < MinBuildings && !opts.DrawSparse {
 		return Picture{}, ErrTooSparse
 	}
@@ -161,20 +170,20 @@ func footprint(p *prism) float64 {
 // draw cuts the scene to the disc, finds the pinned building, orders the prisms and
 // writes the picture. It cuts the scene's prisms in place (to the ground
 // north of southEdge, and to the height the camera can see, tallest), so
-// a scene is drawn once.
-func draw(sc scene, radius float64) Picture {
-	d := &drawing{radius: radius}
+// a scene is drawn once. It gives up with the context's error once the
+// context is done, before it starts or while it orders.
+func draw(ctx context.Context, sc scene, radius float64) (Picture, error) {
+	if err := ctx.Err(); err != nil {
+		return Picture{}, err
+	}
+	d := &drawing{disc: newDisc(radius)}
 	target := 0.0
 	guessed := 0
 	origin := point{}
 	south := southEdge(radius)
 	top := tallest(radius)
 	buildings := map[*prism]bool{} // the buildings in the disc; true for the pinned one
-	for _, p := range sc.prisms {
-		c := centroid(p.outer.pts)
-		if math.Hypot(c.x, c.y) > radius {
-			continue
-		}
+	for _, p := range inDisc(sc.prisms, radius) {
 		holdsPin := holds(p, origin)
 		if !p.cutNorthOf(south) {
 			continue
@@ -200,13 +209,11 @@ func draw(sc scene, radius float64) Picture {
 		pinned = pinned || p.pinned
 	}
 
-	// Ground polygons and lines are cut to the disc; the polygon window
-	// is the drawn disc itself and lines stop just inside it.
-	window := discPolygon(radius, discSegments)
+	// Ground polygons and lines are cut to the disc.
 	for _, pt := range sc.patches {
 		var rings [][]point
 		for i, r := range pt.rings {
-			c := clipConvex(r, window)
+			c := d.disc.clip(r)
 			if len(c) < 3 {
 				if i == 0 {
 					break
@@ -222,15 +229,18 @@ func draw(sc scene, radius float64) Picture {
 			d.patches = append(d.patches, patch{kind: pt.kind, rings: rings})
 		}
 	}
-	inner := radius * math.Cos(math.Pi/discSegments)
 	for _, s := range sc.strokes {
-		for _, part := range clipLineCircle(s.pts, inner) {
+		for _, part := range d.disc.cutLine(s.pts) {
 			d.strokes = append(d.strokes, stroke{kind: s.kind, width: s.width, pts: part})
 		}
 	}
 
 	cam := newCamera(radius, target)
-	d.cycles = order(d.prisms, cam.foot())
+	cycles, err := order(ctx, d.prisms, cam.foot())
+	if err != nil {
+		return Picture{}, err
+	}
+	d.cycles = cycles
 	svg := writeSVG(d, cam)
 	return Picture{
 		SVG:       svg,
@@ -240,7 +250,29 @@ func draw(sc scene, radius float64) Picture {
 		Cycles:    d.cycles,
 		Faces:     d.faces,
 		Pinned:    pinned,
+	}, nil
+}
+
+// inDisc is the prisms of the buildings in the disc: a building is in it
+// when the centre of a part of it is, and then every part of it is drawn.
+// A footprint a tile edge cut in two is one building, drawn whole or not
+// at all: a part left out showed the camera the drawn part's cut edge,
+// which has no wall, as the missing front of a building at the disc's
+// edge.
+func inDisc(prisms []*prism, radius float64) []*prism {
+	in := map[*prism]bool{}
+	for _, p := range prisms {
+		if c := centroid(p.outer.pts); math.Hypot(c.x, c.y) <= radius {
+			in[p.whole()] = true
+		}
 	}
+	out := make([]*prism, 0, len(in))
+	for _, p := range prisms {
+		if in[p.whole()] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // holds reports whether the footprint, courtyards excluded, holds p.

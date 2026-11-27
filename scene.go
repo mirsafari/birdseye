@@ -1,11 +1,13 @@
 package birdseye
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"math"
+	"slices"
 )
 
 // layers is what the picture reads from a tile.
@@ -39,6 +41,18 @@ func (p *prism) whole() *prism {
 		p = p.of
 	}
 	return p
+}
+
+// root is whole, pointing every prism on the way straight at it, so
+// joining many parts stays quick however they were joined.
+func (p *prism) root() *prism {
+	r := p.whole()
+	for p.of != nil && p.of != r {
+		next := p.of
+		p.of = r
+		p = next
+	}
+	return r
 }
 
 // cutNorthOf cuts the prism to the ground north of the line y metres
@@ -106,6 +120,23 @@ type scene struct {
 	prisms  []*prism
 	patches []patch
 	strokes []stroke
+	points  int // decoded from the tiles so far, against maxScenePoints
+}
+
+// maxScenePoints is the most points a drawing decodes from its tiles. The
+// densest drawing in Croatia (central Zagreb at WidestRadius) decodes
+// 147,000; a million keep everything a drawing makes of them (the copies
+// in metres, the walls, the picture) to some tens of megabytes, where a
+// few kilobytes of a hostile tile could otherwise make gigabytes of them.
+const maxScenePoints = 1 << 20
+
+// spend counts the points of a feature that is about to be decoded.
+func (sc *scene) spend(f feature) error {
+	sc.points += f.values / 2
+	if sc.points > maxScenePoints {
+		return fmt.Errorf("%w: more than %d points", ErrTooComplex, maxScenePoints)
+	}
+	return nil
 }
 
 // loadScene reads the tiles that cover a square of half-size reach around
@@ -141,7 +172,9 @@ func loadScene(ctx context.Context, src Tiles, pin Pin, reach float64) (scene, i
 			return sc, found, fmt.Errorf("birdseye: tile %d/%d/%d: %w", Zoom, id.x, id.y, err)
 		}
 	}
-	joinParts(sc.prisms)
+	if err := joinParts(ctx, sc.prisms, fr); err != nil {
+		return sc, found, err
+	}
 	evenHeights(sc.prisms)
 	return sc, found, nil
 }
@@ -155,21 +188,96 @@ func loadScene(ctx context.Context, src Tiles, pin Pin, reach float64) (scene, i
 // that ends on a tile edge meets the neighbour's cut at a point, not along
 // it; and the parts of a tower that stand over one another at different
 // heights stay the separate prisms they are away from a tile edge.
-func joinParts(prisms []*prism) {
-	var cut []*prism
+//
+// Only parts on the same tile edge, whose cuts overlap along it, can
+// belong together, so the cut edges are sorted by the tile edge they lie
+// on and along it, and only overlapping ones are compared: comparing
+// every pair of footprints on any tile edge took 13 seconds for a hostile
+// tile of 80,000 of them. It looks at the context as it goes.
+func joinParts(ctx context.Context, prisms []*prism, fr frame) error {
+	type edge struct {
+		northSouth bool  // a tile edge along a meridian: x is constant
+		at         int64 // which one, in tiles at Zoom from the world's west or north edge
+	}
+	type span struct {
+		p      *prism
+		lo, hi float64 // the extent of its cut along the tile edge, in metres
+	}
+	tiles := float64(int64(1) << Zoom)
+	var edges []edge
+	spans := map[edge][]span{}
+	cut := 0
 	for _, p := range prisms {
-		if p.outer.hasCut() {
-			cut = append(cut, p)
+		r := p.outer
+		if !r.hasCut() {
+			continue
+		}
+		if cut++; cut > maxCutPrisms {
+			return fmt.Errorf("%w: more than %d footprints on tile edges", ErrTooComplex, maxCutPrisms)
+		}
+		var mine []span // one per tile edge the footprint is cut along
+		var on []edge
+		n := len(r.pts)
+		for i, a := range r.pts {
+			if !r.cut[i] {
+				continue
+			}
+			b := r.pts[(i+1)%n]
+			var e edge
+			var lo, hi float64
+			switch {
+			case math.Abs(a.x-b.x) < cutEps && math.Abs(a.y-b.y) >= cutEps:
+				e = edge{true, int64(math.Round((a.x/fr.scale + fr.x0) * tiles))}
+				lo, hi = min(a.y, b.y), max(a.y, b.y)
+			case math.Abs(a.y-b.y) < cutEps && math.Abs(a.x-b.x) >= cutEps:
+				e = edge{false, int64(math.Round((fr.y0 - a.y/fr.scale) * tiles))}
+				lo, hi = min(a.x, b.x), max(a.x, b.x)
+			default: // no length along a tile edge: it covers nothing
+				continue
+			}
+			if k := slices.Index(on, e); k >= 0 {
+				mine[k].lo, mine[k].hi = min(mine[k].lo, lo), max(mine[k].hi, hi)
+				continue
+			}
+			on, mine = append(on, e), append(mine, span{p, lo, hi})
+		}
+		for k, e := range on {
+			if _, seen := spans[e]; !seen {
+				edges = append(edges, e)
+			}
+			spans[e] = append(spans[e], mine[k])
 		}
 	}
-	for i, p := range cut {
-		for _, q := range cut[i+1:] {
-			if a, b := p.whole(), q.whole(); a != b && sameHeights(p, q) && sharesCut(p.outer, q.outer) {
-				b.of = a
+	steps := 0
+	for _, e := range edges {
+		ss := spans[e]
+		slices.SortStableFunc(ss, func(a, b span) int { return cmp.Compare(a.lo, b.lo) })
+		for i, a := range ss {
+			for _, b := range ss[i+1:] {
+				if b.lo >= a.hi { // and so every one after it: they do not overlap
+					break
+				}
+				if steps++; steps%checkEvery == 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+				}
+				if ra, rb := a.p.root(), b.p.root(); ra != rb && sameHeights(a.p, b.p) && sharesCut(a.p.outer, b.p.outer) {
+					rb.of = ra
+				}
 			}
 		}
 	}
+	return nil
 }
+
+// maxCutPrisms is the most footprints on tile edges a scene joins. The
+// densest scene in Croatia has 515.
+const maxCutPrisms = 1 << 14
+
+// checkEvery is how many steps of a loop that can run long go between two
+// looks at the context.
+const checkEvery = 1024
 
 // sameHeights reports whether two prisms can be parts of one footprint:
 // they carry its heights. A guessed top may differ, since each tile
@@ -215,6 +323,9 @@ type tileReader struct {
 	extent    float64
 	lo, hi    tpoint // the square around the pin, in tile units
 	reach     float64
+	pin       tpoint  // the pin, in tile units
+	reach2    float64 // the square of reach in tile units, with a margin
+	buf       []tpoint
 }
 
 func newTileReader(fr frame, id tileID, extent, reach float64) tileReader {
@@ -223,6 +334,9 @@ func newTileReader(fr frame, id tileID, extent, reach float64) tileReader {
 	a := fr.fromLocal(ox, oy, u, point{-reach, reach})
 	b := fr.fromLocal(ox, oy, u, point{reach, -reach})
 	t.lo, t.hi = a, b
+	t.pin = fr.fromLocal(ox, oy, u, point{})
+	r := reach / (u * fr.scale)
+	t.reach2 = r * r * (1 + 1e-9)
 	return t
 }
 
@@ -232,26 +346,58 @@ func (t tileReader) near(f feature) bool {
 	return ok && hi.x >= t.lo.x && lo.x <= t.hi.x && hi.y >= t.lo.y && lo.y <= t.hi.y
 }
 
+// wanted reports whether one polygon or line of a feature near the pin is
+// worth converting. A feature can hold many (Planetiler joins a block's
+// buildings into one), most of them far from the pin: a polygon whose box
+// misses the disc of radius reach around the pin can draw nothing there
+// and is left out, unless its box reaches a side of the tile, where it
+// may be one part of a footprint the tile edge cut, whose other part the
+// neighbouring tile has nearer the pin.
+func (t tileReader) wanted(pts []tpoint) bool {
+	lo, hi := bbox(pts)
+	if lo.x <= sideEps || lo.y <= sideEps || hi.x >= t.extent-sideEps || hi.y >= t.extent-sideEps {
+		return true
+	}
+	nx := max(lo.x, min(t.pin.x, hi.x)) - t.pin.x
+	ny := max(lo.y, min(t.pin.y, hi.y)) - t.pin.y
+	return nx*nx+ny*ny <= t.reach2
+}
+
 func (t tileReader) local(p tpoint) point { return t.fr.toLocal(t.ox, t.oy, t.u, p) }
 
-// polygons groups a feature's rings into polygons: an exterior ring (its
-// area positive in tile units) followed by its holes.
-func polygons(paths [][]tpoint) [][][]tpoint {
-	var out [][][]tpoint
-	for _, p := range paths {
-		r := openRing(p)
+// eachPolygon groups a feature's rings into polygons, an exterior ring
+// (its area positive in tile units) followed by its holes, and hands each
+// polygon whose exterior is wanted to yield, as copies of its own. The
+// holes of an exterior that is not wanted go with it.
+func (t *tileReader) eachPolygon(f feature, yield func(poly [][]tpoint)) error {
+	var poly [][]tpoint // nil while the last exterior is not wanted, or before the first
+	var err error
+	t.buf, err = f.eachPath(t.buf, func(path []tpoint) {
+		r := openRing(path)
 		if len(r) < 3 {
-			continue
+			return
 		}
-		a := tarea(r)
+		a := area(r)
 		switch {
 		case a > 0:
-			out = append(out, [][]tpoint{r})
-		case a < 0 && len(out) > 0:
-			out[len(out)-1] = append(out[len(out)-1], r)
+			if poly != nil {
+				yield(poly)
+			}
+			poly = nil
+			if t.wanted(r) {
+				poly = [][]tpoint{slices.Clone(r)}
+			}
+		case a < 0 && poly != nil:
+			poly = append(poly, slices.Clone(r))
 		}
+	})
+	if err != nil {
+		return err
 	}
-	return out
+	if poly != nil {
+		yield(poly)
+	}
+	return nil
 }
 
 // clipped clips a ring to the tile's own square, so a feature the
@@ -270,22 +416,27 @@ func (t tileReader) clipped(r []tpoint) (ring, bool) {
 }
 
 func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) error {
+	var buf []tpoint // the paths' points, decoded into one buffer
 	if l := ls["building"]; l != nil {
 		t := newTileReader(fr, id, l.extent, reach)
+		t.buf = buf
 		for _, f := range l.features {
 			if f.kind != geomPolygon || f.flag("hide_3d") || !t.near(f) {
 				continue
 			}
-			paths, err := f.paths()
-			if err != nil {
+			if err := sc.spend(f); err != nil {
 				return err
 			}
-			for _, poly := range polygons(paths) {
+			err := t.eachPolygon(f, func(poly [][]tpoint) {
 				if p, ok := t.prism(f, poly); ok {
 					sc.prisms = append(sc.prisms, p)
 				}
+			})
+			if err != nil {
+				return err
 			}
 		}
+		buf = t.buf
 	}
 	for _, name := range []string{"landcover", "landuse", "park", "water", "transportation"} {
 		l := ls[name]
@@ -293,6 +444,7 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 			continue
 		}
 		t := newTileReader(fr, id, l.extent, reach)
+		t.buf = buf
 		for _, f := range l.features {
 			if f.kind != geomPolygon || !t.near(f) {
 				continue
@@ -301,11 +453,10 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 			if !ok {
 				continue
 			}
-			paths, err := f.paths()
-			if err != nil {
+			if err := sc.spend(f); err != nil {
 				return err
 			}
-			for _, poly := range polygons(paths) {
+			err := t.eachPolygon(f, func(poly [][]tpoint) {
 				var rings [][]point
 				for i, r := range poly {
 					c, ok := t.clipped(r)
@@ -320,8 +471,12 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 				if len(rings) > 0 {
 					sc.patches = append(sc.patches, patch{kind: kind, rings: rings})
 				}
+			})
+			if err != nil {
+				return err
 			}
 		}
+		buf = t.buf
 	}
 	for _, name := range []string{"waterway", "transportation"} {
 		l := ls[name]
@@ -337,11 +492,14 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 			if !ok {
 				continue
 			}
-			paths, err := f.paths()
-			if err != nil {
+			if err := sc.spend(f); err != nil {
 				return err
 			}
-			for _, p := range paths {
+			var err error
+			buf, err = f.eachPath(buf, func(p []tpoint) {
+				if !t.wanted(p) {
+					return
+				}
 				for _, part := range clipLineRect(p, t.extent) {
 					pts := make([]point, len(part))
 					for i, q := range part {
@@ -349,6 +507,9 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 					}
 					sc.strokes = append(sc.strokes, stroke{kind: kind, width: width, pts: pts})
 				}
+			})
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -361,7 +522,7 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 func (t tileReader) prism(f feature, poly [][]tpoint) (*prism, bool) {
 	whole := 0.0
 	for _, r := range poly {
-		whole += tarea(r)
+		whole += area(r)
 	}
 	whole *= math.Pow(t.u*t.fr.scale, 2)
 	outer, ok := t.clipped(poly[0])
@@ -369,7 +530,7 @@ func (t tileReader) prism(f feature, poly [][]tpoint) (*prism, bool) {
 		return nil, false
 	}
 	if area(outer.pts) < 0 {
-		outer = outer.reversed()
+		outer.reverse()
 	}
 	p := &prism{outer: outer}
 	for _, r := range poly[1:] {
@@ -378,7 +539,7 @@ func (t tileReader) prism(f feature, poly [][]tpoint) (*prism, bool) {
 			continue
 		}
 		if area(h.pts) > 0 {
-			h = h.reversed()
+			h.reverse()
 		}
 		p.holes = append(p.holes, h)
 	}

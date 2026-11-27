@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -184,22 +186,6 @@ func gzipped(t *testing.T, b []byte) []byte {
 	return buf.Bytes()
 }
 
-// TestGunzipRefusesMoreThanTheLimit: a directory that unpacks to more
-// than a read takes is refused for its size, not cut at the limit and
-// then refused for whatever the cut made of its columns.
-func TestGunzipRefusesMoreThanTheLimit(t *testing.T) {
-	packed := gzipped(t, make([]byte, 100))
-	if got, err := gunzip(packed, 100); err != nil || len(got) != 100 {
-		t.Fatalf("100 bytes under a limit of 100 = %d bytes, %v", len(got), err)
-	}
-	if got, err := gunzip(packed, 99); err == nil || !strings.Contains(err.Error(), "more than 99 bytes") {
-		t.Fatalf("100 bytes under a limit of 99 = %d bytes, %v; want refused for its size", len(got), err)
-	}
-	if _, err := gunzip([]byte("not gzip"), 100); err == nil {
-		t.Fatal("bytes that are not gzip were unpacked")
-	}
-}
-
 func TestNewRefusesWhatItCannotRead(t *testing.T) {
 	if _, err := New(bytes.NewReader([]byte("SQLite format 3\x00" + string(make([]byte, 200))))); !errors.Is(err, ErrNotPMTiles) {
 		t.Errorf("an SQLite file: %v", err)
@@ -235,5 +221,105 @@ func TestDecodeDirectoryRefusesWhatCannotBe(t *testing.T) {
 	// A column that ends early.
 	if _, err := decodeDirectory(good[:len(good)-1]); err == nil {
 		t.Error("a truncated directory was accepted")
+	}
+}
+
+// TestDirectoriesAreBounded: a few kilobytes of gzip can unpack to a
+// directory of millions of entries (a 65 KB archive kept 448 MB of them).
+// The root must end within the first 16 KiB, as the spec lays it out; a
+// directory is refused past maxDirectoryBytes, packed or unpacked; and
+// the leaves kept are bounded by their entries, not only their number.
+func TestDirectoriesAreBounded(t *testing.T) {
+	good := archive{root: []entry{{tileID: 5, offset: 0, length: 3, runLength: 1}}, data: []byte("aaa"), tiles: CompressionNone}.bytes(t)
+	if _, err := New(bytes.NewReader(good)); err != nil {
+		t.Fatalf("a good archive: %v", err)
+	}
+	for _, c := range []struct {
+		name           string
+		offset, length uint64
+	}{
+		{"a root past the first 16 KiB", rootWithin, 10},
+		{"a root that runs past it", 127, rootWithin},
+		{"a root whose end wraps around", 1<<64 - 5, 10},
+	} {
+		b := slices.Clone(good)
+		binary.LittleEndian.PutUint64(b[8:], c.offset)
+		binary.LittleEndian.PutUint64(b[16:], c.length)
+		if _, err := New(bytes.NewReader(b)); err == nil {
+			t.Errorf("%s was accepted", c.name)
+		}
+	}
+
+	// A root that unpacks past the bound: zeros pack a thousandfold.
+	bomb := slices.Clone(good[:headerLength])
+	root := gzipped(t, make([]byte, maxDirectoryBytes+1))
+	if len(root) > rootWithin-headerLength {
+		t.Fatalf("the packed root takes %d bytes", len(root))
+	}
+	binary.LittleEndian.PutUint64(bomb[16:], uint64(len(root)))
+	bomb = append(bomb, root...)
+	if _, err := New(bytes.NewReader(bomb)); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Errorf("a root that unpacks to %d bytes: %v", maxDirectoryBytes+1, err)
+	}
+	r := &Reader{header: Header{InternalCompression: CompressionNone}, src: bytes.NewReader(nil)}
+	if _, err := r.directory(0, maxDirectoryBytes+1); err == nil {
+		t.Error("a directory larger than the bound was read")
+	}
+
+	// The leaves kept stay within their entries.
+	r = &Reader{leaves: map[uint64][]entry{}}
+	for i := range 8 {
+		r.keep(uint64(i), make([]entry, maxCachedEntries/3))
+		if total := r.cached; total > maxCachedEntries || total != len(r.leaves)*(maxCachedEntries/3) {
+			t.Fatalf("after %d leaves: %d entries kept in %d leaves", i+1, total, len(r.leaves))
+		}
+	}
+	r.keep(100, make([]entry, 1))
+	r.keep(100, make([]entry, 1)) // read twice by two lookups at once: kept once
+	if n := len(r.leaves[100]); n != 1 {
+		t.Errorf("leaf kept with %d entries", n)
+	}
+}
+
+// strictReaderAt is an io.ReaderAt over bytes that, like a naive one,
+// slices them by the offset it is given and so panics on a negative one.
+type strictReaderAt []byte
+
+func (b strictReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n := copy(p, b[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+// TestOffsetsPastAnyArchiveAreRefused: an entry's offset is added to its
+// section's, and a sum that wraps around read bytes from elsewhere, or
+// reached the io.ReaderAt as a negative offset.
+func TestOffsetsPastAnyArchiveAreRefused(t *testing.T) {
+	at := zoom2()
+	for _, c := range []struct {
+		name   string
+		offset uint64
+	}{
+		{"an offset that wraps the sum around", 1<<64 - 100},
+		{"an offset that is negative as an int64", 1 << 63},
+	} {
+		tile := archive{root: []entry{{tileID: 5, offset: c.offset, length: 3, runLength: 1}}, data: []byte("aaa"), tiles: CompressionNone}
+		r, err := New(strictReaderAt(tile.bytes(t)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := r.Tile(t.Context(), 2, at[5][0], at[5][1]); err == nil {
+			t.Errorf("%s: a tile read: %q", c.name, got)
+		}
+		leaf := archive{root: []entry{{tileID: 5, offset: c.offset, length: 10}}, data: []byte{}, tiles: CompressionNone}
+		r, err = New(strictReaderAt(leaf.bytes(t)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Tile(t.Context(), 2, at[5][0], at[5][1]); err == nil {
+			t.Errorf("%s: a leaf directory read", c.name)
+		}
 	}
 }

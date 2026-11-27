@@ -44,6 +44,11 @@ type svgWriter struct {
 	buf bytes.Buffer
 	cam camera
 	num []byte
+
+	// Reused from prism to prism.
+	rings []ring
+	walls []wall
+	tops  []point // the rings' roof points, projected, one ring after another
 }
 
 func (w *svgWriter) f(v float64) {
@@ -82,18 +87,58 @@ func (w *svgWriter) open(attrs string) {
 
 func (w *svgWriter) close() { w.buf.WriteString(`"/>`) }
 
-// ground projects points on the ground.
-func (w *svgWriter) ground(pts []point) []point {
-	out := make([]point, len(pts))
+// ground writes points on the ground as one subpath, closed into a ring
+// or open as a line, projecting them as it goes.
+func (w *svgWriter) ground(pts []point, closed bool) {
 	for i, p := range pts {
-		out[i] = w.cam.project(p.x, p.y, 0)
+		q := w.cam.project(p.x, p.y, 0)
+		if i == 0 {
+			w.buf.WriteByte('M')
+		} else {
+			w.buf.WriteByte('L')
+		}
+		w.f(q.x)
+		w.buf.WriteByte(',')
+		w.f(q.y)
 	}
-	return out
+	if closed {
+		w.buf.WriteByte('Z')
+	}
+}
+
+// pointBytes is a little over what one point takes in a path ("L812.3,455.1"),
+// and the size of a picture is about that times its points.
+const pointBytes = 13
+
+// sizeHint is about how many bytes the drawing writes: every ground point
+// once, every footprint point for its roof and about twice for the walls
+// that face the camera (four points each, half the edges), and some for
+// each element. The buffer then grows once instead of doubling its way
+// up to a picture of hundreds of kilobytes.
+func (d *drawing) sizeHint() int {
+	n := len(d.disc.polygon)
+	for _, p := range d.patches {
+		for _, r := range p.rings {
+			n += len(r)
+		}
+	}
+	for _, s := range d.strokes {
+		n += len(s.pts)
+	}
+	elements := 0
+	for _, p := range d.prisms {
+		n += 3 * len(p.outer.pts)
+		for _, h := range p.holes {
+			n += 3 * len(h.pts)
+		}
+		elements += 4
+	}
+	return 1024 + n*pointBytes + elements*64
 }
 
 // drawing is what one picture draws, cut to its disc.
 type drawing struct {
-	radius  float64
+	disc    disc
 	prisms  []*prism // back to front
 	patches []patch
 	strokes []stroke
@@ -104,13 +149,13 @@ type drawing struct {
 // writeSVG writes the drawing seen by the camera.
 func writeSVG(d *drawing, cam camera) []byte {
 	w := &svgWriter{cam: cam}
+	w.buf.Grow(d.sizeHint())
 	w.buf.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 `)
 	w.buf.WriteString(strconv.Itoa(Width) + " " + strconv.Itoa(Height))
 	w.buf.WriteString(`"><g id="` + symbolID + `" stroke-linejoin="round" stroke-width="` + edgeWidth + `">`)
 
-	disc := discPolygon(d.radius, discSegments)
 	w.open(`fill="` + colGround + `"`)
-	w.ring(w.ground(disc))
+	w.ground(d.disc.polygon, true)
 	w.close()
 
 	for _, kind := range []patchKind{patchGreen, patchWater, patchPaved} {
@@ -124,7 +169,7 @@ func writeSVG(d *drawing, cam camera) []byte {
 				started = true
 			}
 			for _, r := range p.rings {
-				w.ring(w.ground(r))
+				w.ground(r, true)
 			}
 		}
 		if started {
@@ -158,7 +203,7 @@ func writeSVG(d *drawing, cam camera) []byte {
 		w.buf.WriteString(`" d="`)
 		for _, s := range d.strokes {
 			if s.kind == g.kind && s.width == g.width {
-				w.line(w.ground(s.pts))
+				w.ground(s.pts, false)
 			}
 		}
 		w.close()
@@ -183,8 +228,9 @@ type wall struct {
 // tones by their angle to the light, then the roof with its courtyards
 // cut out. It returns the faces drawn.
 func (w *svgWriter) prism(p *prism, foot point) int {
-	walls := make([]wall, 0, len(p.outer.pts))
-	for _, r := range append([]ring{p.outer}, p.holes...) {
+	w.rings = append(append(w.rings[:0], p.outer), p.holes...)
+	walls := w.walls[:0]
+	for _, r := range w.rings {
 		n := len(r.pts)
 		for i := range r.pts {
 			if r.cut[i] {
@@ -214,6 +260,7 @@ func (w *svgWriter) prism(p *prism, foot point) int {
 			})
 		}
 	}
+	w.walls = walls
 	slices.SortStableFunc(walls, func(a, b wall) int { return cmp.Compare(b.dist, a.dist) })
 
 	fills, roof, edge := colWalls, colRoof, colEdge
@@ -231,43 +278,42 @@ func (w *svgWriter) prism(p *prism, foot point) int {
 		i = j
 	}
 
-	top := func(r ring) []point {
-		out := make([]point, len(r.pts))
-		for i, q := range r.pts {
-			out[i] = w.cam.project(q.x, q.y, p.z1)
-		}
-		return out
-	}
-	rings := append([]ring{p.outer}, p.holes...)
+	// The roof: every ring projected once, one after another in tops.
+	w.tops = w.tops[:0]
 	cut := false
-	for _, r := range rings {
+	for _, r := range w.rings {
+		for _, q := range r.pts {
+			w.tops = append(w.tops, w.cam.project(q.x, q.y, p.z1))
+		}
 		cut = cut || r.hasCut()
+	}
+	top := func(each func(r ring, pts []point)) {
+		at := 0
+		for _, r := range w.rings {
+			each(r, w.tops[at:at+len(r.pts)])
+			at += len(r.pts)
+		}
 	}
 	if !cut {
 		w.open(`fill="` + roof + `" stroke="` + edge + `"`)
-		for _, r := range rings {
-			w.ring(top(r))
-		}
+		top(func(_ ring, pts []point) { w.ring(pts) })
 		w.close()
 		return len(walls) + 1
 	}
 	// A footprint cut at a tile edge: the roof is filled whole and outlined
 	// only along the building's own edges.
 	w.open(`fill="` + roof + `"`)
-	for _, r := range rings {
-		w.ring(top(r))
-	}
+	top(func(_ ring, pts []point) { w.ring(pts) })
 	w.close()
 	w.open(`fill="none" stroke="` + edge + `"`)
-	for _, r := range rings {
-		pts := top(r)
+	top(func(r ring, pts []point) {
 		n := len(pts)
 		for i := range pts {
 			if !r.cut[i] {
 				w.line([]point{pts[i], pts[(i+1)%n]})
 			}
 		}
-	}
+	})
 	w.close()
 	return len(walls) + 1
 }

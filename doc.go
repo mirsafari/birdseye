@@ -28,7 +28,8 @@
 //   - North is up. The same tiles, pin and StyleVersion give the same
 //     bytes, so a hash of the SVG is a cache key and an address version.
 //   - ErrNoTiles and ErrTooSparse say when there is no picture worth
-//     showing, and none comes with them; a page then shows an ordinary
+//     showing, and none comes with them (nor with ErrTooComplex, for tiles
+//     a drawing refuses); a page then shows an ordinary
 //     map (Options.DrawSparse is for a tool that wants to look at a sparse
 //     place anyway). Any pin may be asked
 //     for: one off the map (towards a pole, or not a number) is
@@ -38,17 +39,24 @@
 // # What an app relies on
 //
 // A drawing reads the tiles around the pin (four of them in most places),
-// takes some milliseconds and allocates some megabytes on the way: 13 ms
-// and 21 MB for a 60 KB picture of central Zagreb. An app that draws on
+// takes some milliseconds and allocates some megabytes on the way: 11 ms
+// and 4 MB for a 60 KB picture of central Zagreb. An app that draws on
 // demand therefore draws a pin once: views of a pin that is being drawn
 // wait for that drawing instead of each starting their own, or a burst of
-// first views is as many drawings at once.
+// first views is as many drawings at once. Render is safe to call from
+// several goroutines at once, over one Tiles that is safe for concurrent
+// use, as the package's sources are.
 //
-// Render takes a context and gives up, with the context's error, between
-// two tiles once it is done. A Tiles answers a tile it does not hold with
+// Render takes a context and gives up, with the context's error, once it
+// is done: between two tiles, and as it joins and orders what it read,
+// the stages that grow faster than the buildings do. What a drawing holds
+// is bounded too: tiles that hold more around the pin than any place does
+// (broken or hostile ones; a tile of a few kilobytes can describe millions
+// of points) are ErrTooComplex, so neither a drawing's time nor its memory
+// follows what a tile claims. A Tiles answers a tile it does not hold with
 // an error that is fs.ErrNotExist, as a file system does for a missing
-// file, so FSTiles is fs.ReadFile and a source of one's own says "missing"
-// the way the standard library does.
+// file, so FSTiles passes a missing file on as it is and a source of one's
+// own says "missing" the way the standard library does.
 //
 // OpenStreetMap's data is under the ODbL and the OpenMapTiles schema under
 // CC-BY: a page showing the picture credits "© OpenMapTiles

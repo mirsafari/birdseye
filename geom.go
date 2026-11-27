@@ -18,43 +18,31 @@ type ring struct {
 func (r ring) hasCut() bool { return slices.Contains(r.cut, true) }
 
 // area is the signed area of the points as a ring: positive when they run
-// counter-clockwise with y pointing north.
-func area(pts []point) float64 {
+// counter-clockwise with y pointing north. In tile units, where y points
+// down, it is positive for an exterior ring of the tile format (clockwise
+// on screen) and negative for a hole.
+func area[P point | tpoint](pts []P) float64 {
 	var s float64
 	n := len(pts)
 	for i := range pts {
-		a, b := pts[i], pts[(i+1)%n]
+		a, b := point(pts[i]), point(pts[(i+1)%n])
 		s += a.x*b.y - b.x*a.y
 	}
 	return s / 2
 }
 
-// tarea is area in tile units, where y points down: an exterior ring of
-// the tile format is positive (clockwise on screen), a hole negative.
-func tarea(pts []tpoint) float64 {
-	var s float64
-	n := len(pts)
-	for i := range pts {
-		a, b := pts[i], pts[(i+1)%n]
-		s += a.x*b.y - b.x*a.y
+// reverse turns the ring to run the other way, in place, its cut flags
+// following their edges: the edge from pts[i] to the next point was the
+// one from pts[n-2-i] to pts[n-1-i], so the flags are reversed and then
+// moved one place back.
+func (r ring) reverse() {
+	slices.Reverse(r.pts)
+	if n := len(r.cut); n > 1 {
+		slices.Reverse(r.cut)
+		first := r.cut[0]
+		copy(r.cut, r.cut[1:])
+		r.cut[n-1] = first
 	}
-	return s / 2
-}
-
-// reversed returns the ring running the other way, cut flags following
-// their edges.
-func (r ring) reversed() ring {
-	n := len(r.pts)
-	out := ring{pts: make([]point, n), cut: make([]bool, n)}
-	for i := range r.pts {
-		out.pts[i] = r.pts[n-1-i]
-	}
-	// The edge from out.pts[i] to out.pts[i+1] is the original edge from
-	// pts[n-2-i] to pts[n-1-i].
-	for i := range out.cut {
-		out.cut[i] = r.cut[((n-2-i)%n+n)%n]
-	}
-	return out
 }
 
 // northOf cuts the ring to the ground at or north of the line y (a
@@ -88,6 +76,10 @@ func (r ring) northOf(y float64) (out ring, ok bool) {
 	return out, len(out.pts) >= 3
 }
 
+// cutEps is how near two points on a tile edge count as on one line, in
+// metres: the two tiles place their shared edge a few nanometres apart.
+const cutEps = 1e-3
+
 // sharesCut reports whether the two rings are parts of one footprint cut
 // by a tile edge: a cut edge of each lies on the same line (a tile edge
 // runs east or north) and one covers at least half of the other. Parts of
@@ -95,7 +87,7 @@ func (r ring) northOf(y float64) (out ring, ok bool) {
 // neighbours whose shared wall ends on the tile edge overlap by that
 // rounding at most.
 func sharesCut(a, b ring) bool {
-	const eps = 1e-3 // metres; the two tiles place their shared edge a few nanometres apart
+	const eps = cutEps
 	span := func(a0, a1, b0, b1 float64) (over, shorter float64) {
 		a0, a1 = min(a0, a1), max(a0, a1)
 		b0, b1 = min(b0, b1), max(b0, b1)
@@ -179,57 +171,61 @@ func clipRect(pts []tpoint, size float64) (out []tpoint, cut []bool) {
 	return out, make([]bool, len(out))
 }
 
-// insideSquare reports whether every point is inside the square and off
-// its sides: the ring then has nothing to clip and no edge along a side.
+// insideSquare reports whether no point is outside the square, its sides
+// included: the ring then has nothing to clip, and an edge of it along a
+// side is a wall the building has there, not one a tile edge made (the
+// footprint does not go on into the next tile, whose copy of it, in its
+// buffer, clips to nothing).
 func insideSquare(pts []tpoint, size float64) bool {
 	for _, p := range pts {
-		if !(p.x > sideEps && p.x < size-sideEps && p.y > sideEps && p.y < size-sideEps) {
+		if !(p.x >= 0 && p.x <= size && p.y >= 0 && p.y <= size) {
 			return false
 		}
 	}
 	return true
 }
 
-// clipSides is clipRect for a ring that reaches a side of the square or
-// crosses one (Sutherland and Hodgman's algorithm, exact for a convex
-// window). A concave ring cut into several pieces comes back as one ring
-// joined by zero-width bridges along the side, which are cut edges too,
-// so they draw nothing.
+// clipSides is clipRect for a ring that crosses a side of the square
+// (Sutherland and Hodgman's algorithm, exact for a convex window). A
+// concave ring cut into several pieces comes back as one ring joined by
+// zero-width bridges along the side, which are cut edges too, so they
+// draw nothing.
 func clipSides(pts []tpoint, size float64) (out []tpoint, cut []bool) {
-	type plane struct {
-		in    func(tpoint) bool
-		cross func(a, b tpoint) tpoint
+	in := func(k int, p tpoint) bool {
+		switch k {
+		case 0:
+			return p.x >= 0
+		case 1:
+			return p.x <= size
+		case 2:
+			return p.y >= 0
+		}
+		return p.y <= size
 	}
 	at := func(a, b tpoint, t float64) tpoint { return tpoint{a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t} }
-	planes := []plane{
-		{func(p tpoint) bool { return p.x >= 0 }, func(a, b tpoint) tpoint { p := at(a, b, a.x/(a.x-b.x)); p.x = 0; return p }},
-		{func(p tpoint) bool { return p.x <= size }, func(a, b tpoint) tpoint { p := at(a, b, (a.x-size)/(a.x-b.x)); p.x = size; return p }},
-		{func(p tpoint) bool { return p.y >= 0 }, func(a, b tpoint) tpoint { p := at(a, b, a.y/(a.y-b.y)); p.y = 0; return p }},
-		{func(p tpoint) bool { return p.y <= size }, func(a, b tpoint) tpoint { p := at(a, b, (a.y-size)/(a.y-b.y)); p.y = size; return p }},
-	}
-	out = pts
-	for _, pl := range planes {
-		if len(out) == 0 {
-			return nil, nil
+	cross := func(k int, a, b tpoint) tpoint {
+		var p tpoint
+		switch k {
+		case 0:
+			p = at(a, b, a.x/(a.x-b.x))
+			p.x = 0
+		case 1:
+			p = at(a, b, (a.x-size)/(a.x-b.x))
+			p.x = size
+		case 2:
+			p = at(a, b, a.y/(a.y-b.y))
+			p.y = 0
+		default:
+			p = at(a, b, (a.y-size)/(a.y-b.y))
+			p.y = size
 		}
-		in := out
-		out = make([]tpoint, 0, len(in)+4)
-		n := len(in)
-		for i := range in {
-			a, b := in[(i+n-1)%n], in[i]
-			ia, ib := pl.in(a), pl.in(b)
-			switch {
-			case ia && ib:
-				out = append(out, b)
-			case ia && !ib:
-				out = append(out, pl.cross(a, b))
-			case !ia && ib:
-				out = append(out, pl.cross(a, b), b)
-			}
-		}
+		return p
 	}
+	out = clipPolygon(pts, 4, in, cross)
 	out = dedupe(out)
-	if len(out) < 3 {
+	// What is left of a footprint that only touches the square, a line
+	// along its side, is nothing.
+	if len(out) < 3 || math.Abs(area(out)) < sideEps {
 		return nil, nil
 	}
 	onSide := func(p tpoint, s int) bool {
@@ -275,41 +271,57 @@ func dedupe[P point | tpoint](pts []P) []P {
 }
 
 // clipConvex clips a ring to a convex window whose points run counter-
-// clockwise (Sutherland and Hodgman).
+// clockwise.
 func clipConvex(pts []point, window []point) []point {
-	out := pts
 	m := len(window)
-	for k := range window {
+	side := func(k int, p point) float64 {
+		e0, e1 := window[k], window[(k+1)%m]
+		return (e1.x-e0.x)*(p.y-e0.y) - (e1.y-e0.y)*(p.x-e0.x)
+	}
+	in := func(k int, p point) bool { return side(k, p) >= 0 }
+	cross := func(k int, a, b point) point {
+		da, db := side(k, a), side(k, b)
+		t := da / (da - db)
+		return point{a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t}
+	}
+	out := dedupe(clipPolygon(pts, m, in, cross))
+	if len(out) < 3 {
+		return nil
+	}
+	return out
+}
+
+// clipPolygon is Sutherland and Hodgman's algorithm, exact for a convex
+// window: it clips a ring to n half-planes in turn, plane k keeping the
+// points in(k, p) says are in, and cross(k, a, b) is where the edge from a
+// to b crosses it. Its two buffers take turns, so a clip allocates twice
+// however many planes it has (the disc has 96); the ring it returns is in
+// one of them, for the caller to copy (dedupe does).
+func clipPolygon[P point | tpoint](pts []P, n int, in func(k int, p P) bool, cross func(k int, a, b P) P) []P {
+	var bufs [2][]P
+	out := pts
+	for k := range n {
 		if len(out) == 0 {
 			return nil
 		}
-		e0, e1 := window[k], window[(k+1)%m]
-		inside := func(p point) bool { return (e1.x-e0.x)*(p.y-e0.y)-(e1.y-e0.y)*(p.x-e0.x) >= 0 }
-		cross := func(a, b point) point {
-			da := (e1.x-e0.x)*(a.y-e0.y) - (e1.y-e0.y)*(a.x-e0.x)
-			db := (e1.x-e0.x)*(b.y-e0.y) - (e1.y-e0.y)*(b.x-e0.x)
-			t := da / (da - db)
-			return point{a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t}
+		src, dst := out, bufs[k%2][:0]
+		if dst == nil {
+			dst = make([]P, 0, len(src)+8)
 		}
-		in := out
-		out = make([]point, 0, len(in)+4)
-		n := len(in)
-		for i := range in {
-			a, b := in[(i+n-1)%n], in[i]
-			ia, ib := inside(a), inside(b)
+		m := len(src)
+		for i := range src {
+			a, b := src[(i+m-1)%m], src[i]
+			ia, ib := in(k, a), in(k, b)
 			switch {
 			case ia && ib:
-				out = append(out, b)
+				dst = append(dst, b)
 			case ia && !ib:
-				out = append(out, cross(a, b))
+				dst = append(dst, cross(k, a, b))
 			case !ia && ib:
-				out = append(out, cross(a, b), b)
+				dst = append(dst, cross(k, a, b), b)
 			}
 		}
-	}
-	out = dedupe(out)
-	if len(out) < 3 {
-		return nil
+		bufs[k%2], out = dst, dst
 	}
 	return out
 }
@@ -318,8 +330,9 @@ func clipConvex(pts []point, window []point) []point {
 // segments that survive, joined into a piece for as long as each starts
 // where the one before it ended.
 type pieces[P point | tpoint] struct {
-	out [][]P
-	cur []P
+	out  [][]P
+	cur  []P
+	left int // the points of the line not yet looked at, the most a new piece can take
 }
 
 // add takes the part from a to b of the line's next segment. cutShort
@@ -327,7 +340,7 @@ type pieces[P point | tpoint] struct {
 func (c *pieces[P]) add(a, b P, cutShort bool) {
 	if len(c.cur) == 0 || c.cur[len(c.cur)-1] != a {
 		c.gap()
-		c.cur = []P{a}
+		c.cur = append(make([]P, 0, c.left+1), a)
 	}
 	c.cur = append(c.cur, b)
 	if cutShort {
@@ -355,6 +368,7 @@ func (c *pieces[P]) done() [][]P {
 func clipLineRect(pts []tpoint, size float64) [][]tpoint {
 	var kept pieces[tpoint]
 	for i := 0; i+1 < len(pts); i++ {
+		kept.left = len(pts) - i - 1
 		a, b := pts[i], pts[i+1]
 		t0, t1, ok := liangBarsky(a, b, size)
 		if !ok {
@@ -401,6 +415,7 @@ func clipLineCircle(pts []point, radius float64) [][]point {
 	var kept pieces[point]
 	r2 := radius * radius
 	for i := 0; i+1 < len(pts); i++ {
+		kept.left = len(pts) - i - 1
 		a, b := pts[i], pts[i+1]
 		dx, dy := b.x-a.x, b.y-a.y
 		A := dx*dx + dy*dy
@@ -427,12 +442,81 @@ func clipLineCircle(pts []point, radius float64) [][]point {
 	return kept.done()
 }
 
-// discPolygon is the drawn disc as a counter-clockwise polygon.
-func discPolygon(radius float64, n int) []point {
-	out := make([]point, n)
-	for k := range out {
-		a := 2 * math.Pi * float64(k) / float64(n)
-		out[k] = point{radius * math.Cos(a), radius * math.Sin(a)}
+// disc is the drawn disc: the ground under it is a polygon of
+// discSegments sides around the pin, the window ground polygons are cut
+// to, and lines stop just inside it, at the polygon's inscribed circle.
+type disc struct {
+	radius  float64
+	polygon []point // counter-clockwise, its corners on the circle
+	inner   float64 // the inscribed circle's radius
+}
+
+func newDisc(radius float64) disc {
+	d := disc{radius: radius, polygon: make([]point, discSegments), inner: radius * math.Cos(math.Pi/discSegments)}
+	for k := range d.polygon {
+		a := 2 * math.Pi * float64(k) / float64(discSegments)
+		d.polygon[k] = point{radius * math.Cos(a), radius * math.Sin(a)}
 	}
-	return out
+	return d
+}
+
+// within reports whether every point is inside the inscribed circle, and
+// so inside every side of the polygon, with a margin far wider than the
+// side test's rounding.
+func (d disc) within(pts []point) bool {
+	r2 := d.inner * d.inner * (1 - 1e-9)
+	for _, p := range pts {
+		if p.x*p.x+p.y*p.y >= r2 {
+			return false
+		}
+	}
+	return true
+}
+
+// bbox is the points' bounding box.
+func bbox[P point | tpoint](pts []P) (lo, hi P) {
+	l, h := point{math.Inf(1), math.Inf(1)}, point{math.Inf(-1), math.Inf(-1)}
+	for _, q := range pts {
+		p := point(q)
+		l.x, l.y = min(l.x, p.x), min(l.y, p.y)
+		h.x, h.y = max(h.x, p.x), max(h.y, p.y)
+	}
+	return P(l), P(h)
+}
+
+// misses reports whether the points' box lies wholly outside the circle
+// of radius r around the pin, with a margin: nothing of them can reach a
+// window inside that circle, and every point clipping leaves lies in
+// their box (what Sutherland and Hodgman's algorithm keeps lies in the
+// convex hull of what it is given).
+func misses(pts []point, r float64) bool {
+	lo, hi := bbox(pts)
+	// The box's point nearest the pin.
+	nx, ny := max(lo.x, min(0, hi.x)), max(lo.y, min(0, hi.y))
+	return nx*nx+ny*ny > r*r*(1+1e-9)
+}
+
+// clip cuts a ground ring to the polygon. A ring wholly inside comes back
+// as clipping would give it (every point kept, in order) without the 96
+// passes, and one wholly outside the circle as nothing.
+func (d disc) clip(pts []point) []point {
+	switch {
+	case misses(pts, d.radius):
+		return nil
+	case d.within(pts):
+		if out := dedupe(pts); len(out) >= 3 {
+			return out
+		}
+		return nil
+	}
+	return clipConvex(pts, d.polygon)
+}
+
+// cutLine cuts a ground line to the inscribed circle; a line whose box
+// misses the circle leaves nothing.
+func (d disc) cutLine(pts []point) [][]point {
+	if misses(pts, d.inner) {
+		return nil
+	}
+	return clipLineCircle(pts, d.inner)
 }

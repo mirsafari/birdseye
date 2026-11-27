@@ -48,7 +48,8 @@ drawing instead of each starting their own. The
 package documentation (`go doc github.com/mirsafari/birdseye`) lists what
 a page can rely on: the group id, the 14 CSS colour variables, where the
 pin lands, and when there is no picture; and what an app can: the cost of
-a drawing, the context, and how a tile source says a tile is missing.
+a drawing and its bounds, the context, drawing from several goroutines,
+and how a tile source says a tile is missing.
 
 ## Packages
 
