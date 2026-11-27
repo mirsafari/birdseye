@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
+	"math/bits"
 	"os"
 	"sort"
 	"sync"
@@ -156,7 +158,11 @@ func (r *Reader) Tile(ctx context.Context, z, x, y int) ([]byte, error) {
 			return nil, notExist(z, x, y)
 		}
 		if e.runLength > 0 {
-			data, err := r.read(r.header.DataOffset+e.offset, uint64(e.length))
+			at, err := within(r.header.DataOffset, e.offset)
+			if err != nil {
+				return nil, fmt.Errorf("pmtiles: tile %d/%d/%d: %w", z, x, y, err)
+			}
+			data, err := r.read(at, uint64(e.length))
 			if err != nil {
 				return nil, fmt.Errorf("pmtiles: tile %d/%d/%d: %w", z, x, y, err)
 			}
@@ -183,7 +189,11 @@ func (r *Reader) leaf(offset, length uint64) ([]entry, error) {
 	if ok {
 		return dir, nil
 	}
-	dir, err := r.directory(r.header.LeafOffset+offset, length)
+	at, err := within(r.header.LeafOffset, offset)
+	if err != nil {
+		return nil, fmt.Errorf("leaf directory: %w", err)
+	}
+	dir, err = r.directory(at, length)
 	if err != nil {
 		return nil, fmt.Errorf("leaf directory: %w", err)
 	}
@@ -230,9 +240,25 @@ func (r *Reader) directory(offset, length uint64) ([]entry, error) {
 	return decodeDirectory(raw)
 }
 
+// within is where bytes at offset into a section that starts at base are
+// in the archive, or an error for a sum past any archive's end: one that
+// wraps around would read bytes from elsewhere.
+func within(base, offset uint64) (uint64, error) {
+	at, carry := bits.Add64(base, offset, 0)
+	if carry != 0 {
+		return 0, fmt.Errorf("an offset of %d into a section at %d", offset, base)
+	}
+	return at, nil
+}
+
 func (r *Reader) read(offset, length uint64) ([]byte, error) {
 	if length > maxRead {
 		return nil, fmt.Errorf("a read of %d bytes", length)
+	}
+	// io.ReaderAt takes an int64, and a negative offset is one an
+	// io.ReaderAt need not expect: refused here, whatever src is.
+	if offset > math.MaxInt64-length {
+		return nil, fmt.Errorf("a read of %d bytes at %d, past any archive's end", length, offset)
 	}
 	buf := make([]byte, length)
 	n, err := r.src.ReadAt(buf, int64(offset))

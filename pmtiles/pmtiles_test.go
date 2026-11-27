@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"io/fs"
 	"slices"
 	"strings"
@@ -277,5 +278,48 @@ func TestDirectoriesAreBounded(t *testing.T) {
 	r.keep(100, make([]entry, 1)) // read twice by two lookups at once: kept once
 	if n := len(r.leaves[100]); n != 1 {
 		t.Errorf("leaf kept with %d entries", n)
+	}
+}
+
+// strictReaderAt is an io.ReaderAt over bytes that, like a naive one,
+// slices them by the offset it is given and so panics on a negative one.
+type strictReaderAt []byte
+
+func (b strictReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n := copy(p, b[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+// TestOffsetsPastAnyArchiveAreRefused: an entry's offset is added to its
+// section's, and a sum that wraps around read bytes from elsewhere, or
+// reached the io.ReaderAt as a negative offset.
+func TestOffsetsPastAnyArchiveAreRefused(t *testing.T) {
+	at := zoom2()
+	for _, c := range []struct {
+		name   string
+		offset uint64
+	}{
+		{"an offset that wraps the sum around", 1<<64 - 100},
+		{"an offset that is negative as an int64", 1 << 63},
+	} {
+		tile := archive{root: []entry{{tileID: 5, offset: c.offset, length: 3, runLength: 1}}, data: []byte("aaa"), tiles: CompressionNone}
+		r, err := New(strictReaderAt(tile.bytes(t)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := r.Tile(t.Context(), 2, at[5][0], at[5][1]); err == nil {
+			t.Errorf("%s: a tile read: %q", c.name, got)
+		}
+		leaf := archive{root: []entry{{tileID: 5, offset: c.offset, length: 10}}, data: []byte{}, tiles: CompressionNone}
+		r, err = New(strictReaderAt(leaf.bytes(t)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Tile(t.Context(), 2, at[5][0], at[5][1]); err == nil {
+			t.Errorf("%s: a leaf directory read", c.name)
+		}
 	}
 }
