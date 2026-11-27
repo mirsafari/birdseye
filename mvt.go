@@ -146,7 +146,20 @@ type tpoint struct{ x, y float64 }
 // (first point repeated at the end), a line's parts open.
 func (f feature) paths() ([][]tpoint, error) {
 	var out [][]tpoint
-	var cur []tpoint
+	if _, err := f.eachPath(nil, func(path []tpoint) { out = append(out, slices.Clone(path)) }); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// eachPath decodes the geometry path by path into buf, which it reuses
+// and returns for the next feature: a polygon's rings closed (first point
+// repeated at the end), a line's parts open. A path handed to yield is
+// only good until yield returns, so a caller keeps a copy of what it
+// wants and pays nothing for what it does not: most paths of a feature
+// are far from the pin.
+func (f feature) eachPath(buf []tpoint, yield func(path []tpoint)) ([]tpoint, error) {
+	cur := buf[:0]
 	var x, y int64
 	g := varints{b: f.geometry}
 	for i := 0; i < f.values; {
@@ -156,7 +169,7 @@ func (f feature) paths() ([][]tpoint, error) {
 		switch cmd {
 		case 1, 2: // MoveTo, LineTo
 			if i+2*count > f.values {
-				return nil, errMalformed
+				return cur, errMalformed
 			}
 			if cmd == 2 { // the path's points, and the one ClosePath repeats
 				cur = slices.Grow(cur, count+1)
@@ -167,9 +180,9 @@ func (f feature) paths() ([][]tpoint, error) {
 				i += 2
 				if cmd == 1 {
 					if len(cur) > 0 {
-						out = append(out, cur)
+						yield(cur)
 					}
-					cur = nil
+					cur = cur[:0]
 				}
 				cur = append(cur, tpoint{float64(x), float64(y)})
 			}
@@ -178,13 +191,13 @@ func (f feature) paths() ([][]tpoint, error) {
 				cur = append(cur, cur[0])
 			}
 		default:
-			return nil, errMalformed
+			return cur, errMalformed
 		}
 	}
 	if len(cur) > 0 {
-		out = append(out, cur)
+		yield(cur)
 	}
-	return out, nil
+	return cur, nil
 }
 
 // bounds is the box of the geometry in tile units, read from the commands

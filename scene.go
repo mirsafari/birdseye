@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"math"
+	"slices"
 )
 
 // layers is what the picture reads from a tile.
@@ -217,6 +218,7 @@ type tileReader struct {
 	reach     float64
 	pin       tpoint  // the pin, in tile units
 	reach2    float64 // the square of reach in tile units, with a margin
+	buf       []tpoint
 }
 
 func newTileReader(fr frame, id tileID, extent, reach float64) tileReader {
@@ -256,24 +258,39 @@ func (t tileReader) wanted(pts []tpoint) bool {
 
 func (t tileReader) local(p tpoint) point { return t.fr.toLocal(t.ox, t.oy, t.u, p) }
 
-// polygons groups a feature's rings into polygons: an exterior ring (its
-// area positive in tile units) followed by its holes.
-func polygons(paths [][]tpoint) [][][]tpoint {
-	var out [][][]tpoint
-	for _, p := range paths {
-		r := openRing(p)
+// eachPolygon groups a feature's rings into polygons, an exterior ring
+// (its area positive in tile units) followed by its holes, and hands each
+// polygon whose exterior is wanted to yield, as copies of its own. The
+// holes of an exterior that is not wanted go with it.
+func (t *tileReader) eachPolygon(f feature, yield func(poly [][]tpoint)) error {
+	var poly [][]tpoint // nil while the last exterior is not wanted, or before the first
+	var err error
+	t.buf, err = f.eachPath(t.buf, func(path []tpoint) {
+		r := openRing(path)
 		if len(r) < 3 {
-			continue
+			return
 		}
 		a := area(r)
 		switch {
 		case a > 0:
-			out = append(out, [][]tpoint{r})
-		case a < 0 && len(out) > 0:
-			out[len(out)-1] = append(out[len(out)-1], r)
+			if poly != nil {
+				yield(poly)
+			}
+			poly = nil
+			if t.wanted(r) {
+				poly = [][]tpoint{slices.Clone(r)}
+			}
+		case a < 0 && poly != nil:
+			poly = append(poly, slices.Clone(r))
 		}
+	})
+	if err != nil {
+		return err
 	}
-	return out
+	if poly != nil {
+		yield(poly)
+	}
+	return nil
 }
 
 // clipped clips a ring to the tile's own square, so a feature the
@@ -292,25 +309,24 @@ func (t tileReader) clipped(r []tpoint) (ring, bool) {
 }
 
 func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) error {
+	var buf []tpoint // the paths' points, decoded into one buffer
 	if l := ls["building"]; l != nil {
 		t := newTileReader(fr, id, l.extent, reach)
+		t.buf = buf
 		for _, f := range l.features {
 			if f.kind != geomPolygon || f.flag("hide_3d") || !t.near(f) {
 				continue
 			}
-			paths, err := f.paths()
-			if err != nil {
-				return err
-			}
-			for _, poly := range polygons(paths) {
-				if !t.wanted(poly[0]) {
-					continue
-				}
+			err := t.eachPolygon(f, func(poly [][]tpoint) {
 				if p, ok := t.prism(f, poly); ok {
 					sc.prisms = append(sc.prisms, p)
 				}
+			})
+			if err != nil {
+				return err
 			}
 		}
+		buf = t.buf
 	}
 	for _, name := range []string{"landcover", "landuse", "park", "water", "transportation"} {
 		l := ls[name]
@@ -318,6 +334,7 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 			continue
 		}
 		t := newTileReader(fr, id, l.extent, reach)
+		t.buf = buf
 		for _, f := range l.features {
 			if f.kind != geomPolygon || !t.near(f) {
 				continue
@@ -326,14 +343,7 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 			if !ok {
 				continue
 			}
-			paths, err := f.paths()
-			if err != nil {
-				return err
-			}
-			for _, poly := range polygons(paths) {
-				if !t.wanted(poly[0]) {
-					continue
-				}
+			err := t.eachPolygon(f, func(poly [][]tpoint) {
 				var rings [][]point
 				for i, r := range poly {
 					c, ok := t.clipped(r)
@@ -348,8 +358,12 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 				if len(rings) > 0 {
 					sc.patches = append(sc.patches, patch{kind: kind, rings: rings})
 				}
+			})
+			if err != nil {
+				return err
 			}
 		}
+		buf = t.buf
 	}
 	for _, name := range []string{"waterway", "transportation"} {
 		l := ls[name]
@@ -365,13 +379,10 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 			if !ok {
 				continue
 			}
-			paths, err := f.paths()
-			if err != nil {
-				return err
-			}
-			for _, p := range paths {
+			var err error
+			buf, err = f.eachPath(buf, func(p []tpoint) {
 				if !t.wanted(p) {
-					continue
+					return
 				}
 				for _, part := range clipLineRect(p, t.extent) {
 					pts := make([]point, len(part))
@@ -380,6 +391,9 @@ func (sc *scene) add(fr frame, id tileID, ls map[string]*layer, reach float64) e
 					}
 					sc.strokes = append(sc.strokes, stroke{kind: kind, width: width, pts: pts})
 				}
+			})
+			if err != nil {
+				return err
 			}
 		}
 	}
