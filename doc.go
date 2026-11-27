@@ -27,7 +27,9 @@
 //   - North is up. The same tiles, pin and StyleVersion give the same
 //     bytes, so a hash of the SVG is a cache key and an address version.
 //   - ErrNoTiles and ErrTooSparse say when there is no picture worth
-//     showing; a page then shows an ordinary map.
+//     showing; a page then shows an ordinary map. Any pin may be asked
+//     for: one off the map (towards a pole, or not a number) is
+//     ErrNoTiles, and no picture reads more than a few tiles.
 //
 // OpenStreetMap's data is under the ODbL and the OpenMapTiles schema under
 // CC-BY: a page showing the picture credits "© OpenMapTiles

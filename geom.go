@@ -61,6 +61,77 @@ func (r ring) reversed() ring {
 	return out
 }
 
+// northOf cuts the ring to the ground at or north of the line y (a
+// half-plane, so Sutherland and Hodgman's algorithm is exact), marking the
+// edges the cut makes as cut edges: no wall, no outline. ok is false when
+// nothing is left. A ring wholly north of the line comes back as it is.
+func (r ring) northOf(y float64) (out ring, ok bool) {
+	south := false
+	for _, p := range r.pts {
+		if p.y < y {
+			south = true
+			break
+		}
+	}
+	if !south {
+		return r, true
+	}
+	n := len(r.pts)
+	for i, a := range r.pts {
+		b := r.pts[(i+1)%n]
+		cross := func() point { return point{a.x + (b.x-a.x)*(y-a.y)/(b.y-a.y), y} }
+		switch ia, ib := a.y >= y, b.y >= y; {
+		case ia && ib:
+			out.pts, out.cut = append(out.pts, a), append(out.cut, r.cut[i])
+		case ia && !ib: // leaving: the next edge runs along the line
+			out.pts, out.cut = append(out.pts, a, cross()), append(out.cut, r.cut[i], true)
+		case !ia && ib: // coming back: the rest of this edge
+			out.pts, out.cut = append(out.pts, cross()), append(out.cut, r.cut[i])
+		}
+	}
+	return out, len(out.pts) >= 3
+}
+
+// sharesCut reports whether the two rings are parts of one footprint cut
+// by a tile edge: a cut edge of each lies on the same line (a tile edge
+// runs east or north) and one covers at least half of the other. Parts of
+// one footprint cover each other's cut but for a tile unit of rounding;
+// neighbours whose shared wall ends on the tile edge overlap by that
+// rounding at most.
+func sharesCut(a, b ring) bool {
+	const eps = 1e-3 // metres; the two tiles place their shared edge a few nanometres apart
+	span := func(a0, a1, b0, b1 float64) (over, shorter float64) {
+		a0, a1 = math.Min(a0, a1), math.Max(a0, a1)
+		b0, b1 = math.Min(b0, b1), math.Max(b0, b1)
+		return math.Min(a1, b1) - math.Max(a0, b0), math.Min(a1-a0, b1-b0)
+	}
+	covers := func(over, shorter float64) bool { return shorter > eps && over >= shorter/2 }
+	na, nb := len(a.pts), len(b.pts)
+	for i, p := range a.pts {
+		if !a.cut[i] {
+			continue
+		}
+		q := a.pts[(i+1)%na]
+		for j, r := range b.pts {
+			if !b.cut[j] {
+				continue
+			}
+			s := b.pts[(j+1)%nb]
+			switch {
+			case math.Abs(p.x-q.x) < eps && math.Abs(r.x-s.x) < eps && math.Abs(p.x-r.x) < eps: // both along one north-south edge
+				if covers(span(p.y, q.y, r.y, s.y)) {
+					return true
+				}
+			case math.Abs(p.y-q.y) < eps && math.Abs(r.y-s.y) < eps && math.Abs(p.y-r.y) < eps: // both along one east-west edge
+				if covers(span(p.x, q.x, r.x, s.x)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // contains reports whether p lies inside the ring (even-odd).
 func contains(pts []point, p point) bool {
 	in := false

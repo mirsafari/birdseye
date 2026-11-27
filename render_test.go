@@ -2,10 +2,13 @@ package birdseye
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"math"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -323,21 +326,23 @@ func TestACutEdgeDrawsNoWallAndNoOutline(t *testing.T) {
 
 func TestEveryPlaceRendersInOrder(t *testing.T) {
 	// The fixture counts move when the fixtures are refreshed (README).
+	// A tile edge crosses three of the discs (Zagreb, Zelena Laguna and
+	// Delnice), where a footprint cut in two counts once.
 	want := map[string]struct {
 		buildings int
 		pinned    bool
 		sparse    bool
 	}{
 		"split-riva":         {135, true, false},
-		"zagreb-vukovarska":  {51, false, false},
+		"zagreb-vukovarska":  {47, false, false},
 		"varazdin-centre":    {80, false, false},
 		"porec-riva":         {141, false, false},
 		"komiza-harbour":     {321, false, false},
 		"rovinj-old-town":    {452, false, false},
 		"makarska-riva":      {123, false, false},
-		"zelena-laguna-camp": {99, false, false},
+		"zelena-laguna-camp": {96, false, false},
 		"sv-martin-na-muri":  {165, false, false},
-		"delnice-centre":     {130, false, false},
+		"delnice-centre":     {126, false, false},
 		"zagreb-jankomir":    {22, false, true},
 	}
 	for _, p := range places {
@@ -430,4 +435,284 @@ func TestThePinIsWhereTheCameraAims(t *testing.T) {
 			}
 		}
 	}
+}
+
+// tilesFunc is a tile source in a function.
+type tilesFunc func(z, x, y int) ([]byte, error)
+
+func (f tilesFunc) Tile(z, x, y int) ([]byte, error) { return f(z, x, y) }
+
+// TestAPinOffTheMapHasNoPictureAndReadsNoTiles: towards a pole a metre
+// spans ever more of the world, and the tiles around a pin there were
+// listed without end (7 GB of them at 89.999°) before one was read.
+func TestAPinOffTheMapHasNoPictureAndReadsNoTiles(t *testing.T) {
+	read := 0
+	counting := tilesFunc(func(z, x, y int) ([]byte, error) { read++; return nil, nil })
+	for _, pin := range []Pin{
+		{89.999, 16}, {90, 16}, {-90, 16}, {85.06, 16}, {45, 181}, {45, -181},
+		{math.NaN(), 16}, {45, math.NaN()}, {math.Inf(1), 16}, {45, math.Inf(-1)},
+	} {
+		if _, err := Render(counting, pin); !errors.Is(err, ErrNoTiles) {
+			t.Errorf("%v: %v, want ErrNoTiles", pin, err)
+		}
+		if got := TilesFor(pin); got != nil {
+			t.Errorf("%v: %d tiles listed", pin, len(got))
+		}
+	}
+	if read != 0 {
+		t.Errorf("%d tiles were asked for", read)
+	}
+	// The northernmost pin on the map is the widest case: a few tiles.
+	if n := len(TilesFor(Pin{maxLatitude, 16})); n == 0 || n > 36 {
+		t.Errorf("a pin at Web Mercator's edge lists %d tiles", n)
+	}
+	if _, err := Render(counting, Pin{maxLatitude, 16}); !errors.Is(err, ErrNoTiles) || read == 0 {
+		t.Errorf("a pin at Web Mercator's edge: %v after %d tiles", err, read)
+	}
+}
+
+func TestARadiusTooWideToReadIsRefused(t *testing.T) {
+	pin := places[0].Pin
+	for _, radius := range []float64{1e6, 1e12, math.Inf(1)} {
+		if _, err := RenderWith(fixtures, pin, Options{Radius: radius}); !errors.Is(err, ErrTooWide) {
+			t.Errorf("radius %v: %v, want ErrTooWide", radius, err)
+		}
+	}
+	if ids := tilesAround(newFrame(pin), 1e9); ids != nil {
+		t.Errorf("%d tiles listed for a reach of a million kilometres", len(ids))
+	}
+	// A radius that is no number at all is the place's own.
+	own, err := Render(fixtures, pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, radius := range []float64{math.NaN(), -5} {
+		pic, err := RenderWith(fixtures, pin, Options{Radius: radius})
+		if err != nil || pic.Radius != own.Radius {
+			t.Errorf("radius %v: drawn %v m around (%v), want the place's %v", radius, pic.Radius, err, own.Radius)
+		}
+	}
+}
+
+// edgeScene is three buildings on the edge between two tiles, each cut in
+// two by it, as the two tiles carry them (each into its buffer), and a
+// pin in the first one's western half: the shop; a penthouse standing on
+// the shop from 12 m up; and a neighbour as high as the shop, south of it
+// behind a party wall that ends on the tile edge.
+func edgeScene(t *testing.T) scene {
+	t.Helper()
+	const extent = 4096
+	n := float64(int(1) << Zoom)
+	west, east := tileID{8900, 5900}, tileID{8901, 5900}
+	// The pin: 5 units west of the shared edge, in the middle of the shop.
+	wx := (float64(west.x) + float64(extent-5)/extent) / n
+	wy := (float64(west.y) + 2000.0/extent) / n
+	fr := newFrame(Pin{Lat: math.Atan(math.Sinh(math.Pi*(1-2*wy))) * 180 / math.Pi, Lng: wx*360 - 180})
+
+	building := func(height, minHeight int64, geometry []uint32) feature {
+		return feature{kind: geomPolygon, geometry: geometry,
+			props: map[string]any{"render_height": height, "render_min_height": minHeight}}
+	}
+	// x is where the tile has its own east (or west) edge: the buildings
+	// reach 20 units to either side of it.
+	tile := func(x int32) map[string]*layer {
+		return map[string]*layer{"building": {extent: extent, features: []feature{
+			building(12, 0, square(x-20, 1980, 40)),  // the shop
+			building(20, 12, square(x-10, 1990, 20)), // the penthouse
+			building(12, 0, square(x-20, 2020, 40)),  // the neighbour
+		}}}
+	}
+	var sc scene
+	if err := sc.add(fr, west, tile(extent), 460); err != nil {
+		t.Fatal(err)
+	}
+	if err := sc.add(fr, east, tile(0), 460); err != nil {
+		t.Fatal(err)
+	}
+	joinParts(sc.prisms)
+	if len(sc.prisms) != 6 {
+		t.Fatalf("%d prisms, want each building's two halves", len(sc.prisms))
+	}
+	return sc
+}
+
+// TestAFootprintCutByATileEdgeIsOneBuilding: each tile draws its own side
+// of a footprint on its edge, and the half the pin was not in used to be
+// drawn as any other building.
+func TestAFootprintCutByATileEdgeIsOneBuilding(t *testing.T) {
+	sc := edgeScene(t)
+	pic := draw(sc, MinRadius)
+	if !pic.Pinned || pic.Buildings != 3 {
+		t.Fatalf("pinned %v, buildings %d, want the pinned shop among 3 buildings", pic.Pinned, pic.Buildings)
+	}
+	wholes := map[*prism]bool{}
+	for _, p := range sc.prisms {
+		wholes[p.whole()] = true
+		// The neighbour is the one on the ground south of the shop.
+		neighbour := p.z0 == 0 && centroid(p.outer.pts).y < -9
+		if p.pinned == neighbour {
+			t.Errorf("prism at %v from %v m up: pinned %v", centroid(p.outer.pts), p.z0, p.pinned)
+		}
+	}
+	if len(wholes) != 3 {
+		t.Errorf("%d buildings among the six halves, want 3", len(wholes))
+	}
+	// The whole shop is in the pinned colours: both its halves' roofs.
+	if n := strings.Count(string(pic.SVG), `fill="`+colPinnedRoof+`"`); n != 4 {
+		t.Errorf("%d pinned roofs drawn, want the shop's and the penthouse's two halves each", n)
+	}
+}
+
+func TestSharesCutTellsAFootprintFromItsNeighbour(t *testing.T) {
+	half := func(x0, x1, y0, y1 float64, cut int) ring {
+		r := ring{pts: []point{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}, cut: make([]bool, 4)}
+		r.cut[cut] = true
+		return r
+	}
+	west := half(-10, 0, 0, 10, 1) // its east edge is the cut
+	cases := []struct {
+		name  string
+		other ring
+		want  bool
+	}{
+		{"the other half", half(0, 10, 0.2, 10.1, 3), true}, // a tile unit of rounding
+		{"a neighbour behind a party wall", half(0, 10, 10, 20, 3), false},
+		{"a neighbour overlapping by the rounding", half(0, 10, 9.7, 20, 3), false},
+		{"a half across another edge", half(-10, 0, 10, 20, 0), false},
+		{"a building along the same line further on", half(0, 10, 40, 50, 3), false},
+	}
+	for _, c := range cases {
+		if got := sharesCut(west, c.other); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+		if got := sharesCut(c.other, west); got != c.want {
+			t.Errorf("%s, the other way round: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestABuildingDoesNotRunOnBehindTheCamera: a hall whose centre is in the
+// disc and whose far end is south of the camera used to be projected
+// through the camera's own plane, its south end landing above the picture.
+func TestABuildingDoesNotRunOnBehindTheCamera(t *testing.T) {
+	// 20 m wide, from 40 m north of the pin to 900 m south of it; the
+	// points along its north wall keep its centre (their mean) in the disc.
+	pts := []point{{-10, -900}, {10, -900}}
+	for x := 10.0; x >= -10; x-- {
+		pts = append(pts, point{x, 40})
+	}
+	hall := &prism{outer: ring{pts: pts, cut: make([]bool, len(pts))}, z1: 9}
+	if c := centroid(pts); math.Hypot(c.x, c.y) > MinRadius {
+		t.Fatalf("the hall's centre %v is outside the disc", c)
+	}
+	pic := draw(scene{prisms: []*prism{hall}}, MinRadius)
+	if pic.Buildings != 1 {
+		t.Fatalf("buildings = %d", pic.Buildings)
+	}
+	south, cuts := math.Inf(1), 0
+	for i, p := range hall.outer.pts {
+		south = math.Min(south, p.y)
+		if hall.outer.cut[i] {
+			cuts++
+		}
+	}
+	if south != southEdge(MinRadius) || cuts != 1 {
+		t.Errorf("the hall reaches %v m with %d cut edges, want it cut once at %v", south, cuts, southEdge(MinRadius))
+	}
+	svg := string(pic.SVG)
+	if strings.Contains(svg, "Inf") || strings.Contains(svg, "NaN") {
+		t.Fatalf("the picture holds a number that is none:\n%s", svg)
+	}
+	// Nothing of it is drawn above the frame: the first path is the
+	// ground, the rest the hall.
+	prisms := svg[strings.Index(svg, `"/>`):]
+	for _, m := range regexp.MustCompile(`[ML](-?[0-9.]+),(-?[0-9.]+)`).FindAllStringSubmatch(prisms, -1) {
+		if y, err := strconv.ParseFloat(m[2], 64); err != nil || y < -Height {
+			t.Fatalf("a point of the hall at y=%v (%v)", m[2], err)
+		}
+	}
+
+	// A ring that stays north of the line is left alone.
+	north := ring{pts: []point{{0, 0}, {10, 0}, {10, 10}}, cut: make([]bool, 3)}
+	if got, ok := north.northOf(-5); !ok || len(got.pts) != 3 {
+		t.Errorf("a ring north of the line was cut: %v", got)
+	}
+	if _, ok := north.northOf(50); ok {
+		t.Error("a ring south of the line survived")
+	}
+}
+
+func TestGunzipRefusesATileThatUnpacksTooLarge(t *testing.T) {
+	var packed bytes.Buffer
+	zw := gzip.NewWriter(&packed)
+	_, _ = zw.Write(make([]byte, 1000))
+	_ = zw.Close()
+	if out, err := gunzip(packed.Bytes(), 1000); err != nil || len(out) != 1000 {
+		t.Fatalf("a tile at the limit: %d bytes, %v", len(out), err)
+	}
+	if _, err := gunzip(packed.Bytes(), 999); err == nil {
+		t.Fatal("a tile over the limit was unpacked")
+	}
+	plain := []byte("not gzipped")
+	if out, err := gunzip(plain, 4); err != nil || !bytes.Equal(out, plain) {
+		t.Fatalf("a tile that is not gzipped: %q, %v", out, err)
+	}
+}
+
+func TestDecodeTileRefusesWhatCannotBeDrawn(t *testing.T) {
+	feature := pb{}.packed(2, 0, 0).uint(3, 3).packed(4, square(100, 200, 50)...)
+	layerOf := func(name string, extent uint64, feature pb) pb {
+		return pb{}.bytes(3, pb{}.uint(15, 2).bytes(1, []byte(name)).bytes(2, feature).
+			bytes(3, []byte("render_height")).bytes(4, pb{}.uint(4, 12)).uint(5, extent))
+	}
+	if _, err := decodeTile(layerOf("building", 4096, feature), layers); err != nil {
+		t.Fatalf("a good tile: %v", err)
+	}
+	if _, err := decodeTile(layerOf("building", 0, feature), layers); !errors.Is(err, errMalformed) {
+		t.Errorf("an extent of 0: %v", err)
+	}
+	if _, err := decodeTile(layerOf("poi", 0, feature), layers); err != nil {
+		t.Errorf("a layer the picture does not read: %v", err)
+	}
+	for _, tags := range [][]uint32{{1, 0}, {0, 1}, {1 << 31, 0}, {0, 1<<32 - 1}} {
+		bad := pb{}.packed(2, tags...).uint(3, 3).packed(4, square(100, 200, 50)...)
+		if _, err := decodeTile(layerOf("building", 4096, bad), layers); !errors.Is(err, errMalformed) {
+			t.Errorf("tags %v: %v", tags, err)
+		}
+	}
+}
+
+// TestWhatIsCutSouthIsBelowTheFrame: the cut at southEdge takes nothing
+// out of a picture. Wherever a fixture footprint runs south of the line,
+// even its roof there is below the frame's bottom edge (with the camera
+// aimed at the ground, its highest aim).
+func TestWhatIsCutSouthIsBelowTheFrame(t *testing.T) {
+	cut := 0
+	for _, p := range places {
+		sc, _, err := loadScene(fixtures, p.Pin, MaxRadius+reachMargin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, radius := range []float64{placeRadius(sc.prisms), MinRadius, 360} {
+			cam := newCamera(radius, 0)
+			for _, pr := range sc.prisms {
+				if c := centroid(pr.outer.pts); math.Hypot(c.x, c.y) > radius {
+					continue
+				}
+				for _, q := range pr.outer.pts {
+					if q.y >= southEdge(radius) {
+						continue
+					}
+					cut++
+					if at := cam.project(q.x, q.y, pr.z1); at.y <= Height {
+						t.Errorf("%s at %v m: a roof %v m up at %v is cut inside the frame (%v)", p.Name, radius, pr.z1, q, at)
+					}
+				}
+			}
+		}
+	}
+	if cut == 0 {
+		t.Error("no fixture footprint runs south of the line: the test checks nothing")
+	}
+	t.Logf("%d footprint points south of the line, all below the frame", cut)
 }
