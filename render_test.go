@@ -346,11 +346,12 @@ func TestEveryPlaceRendersInOrder(t *testing.T) {
 		"zagreb-jankomir":    {22, false, true},
 	}
 	for _, p := range places {
-		pic, err := Render(fixtures, p.Pin)
-		sparse := errors.Is(err, ErrTooSparse)
-		if err != nil && !sparse {
+		// Drawn whatever its density, so the sparse place is counted too.
+		pic, err := RenderWith(fixtures, p.Pin, Options{DrawSparse: true})
+		if err != nil {
 			t.Fatalf("%s: %v", p.Name, err)
 		}
+		sparse := pic.Buildings < MinBuildings
 		w := want[p.Name]
 		t.Logf("%-20s radius %3.0f buildings %4d guessed %4d faces %5d cycles %d svg %d KB pinned %v", p.Name, pic.Radius, pic.Buildings, pic.Guessed, pic.Faces, pic.Cycles, len(pic.SVG)/1024, pic.Pinned)
 		if pic.Buildings != w.buildings {
@@ -386,6 +387,31 @@ func TestTheSameInputDrawsTheSameBytes(t *testing.T) {
 	}
 }
 
+// TestASparsePlaceHasNoPictureUnlessAskedFor: an error comes with no
+// picture, so a caller that forgets to look at the error shows nothing
+// rather than a few sheds; a tool that wants to see them says so.
+func TestASparsePlaceHasNoPictureUnlessAskedFor(t *testing.T) {
+	jankomir := places[len(places)-1].Pin
+	pic, err := Render(fixtures, jankomir)
+	if !errors.Is(err, ErrTooSparse) {
+		t.Fatalf("Jankomir: %v, want ErrTooSparse", err)
+	}
+	if pic.SVG != nil || pic.Buildings != 0 || pic.Radius != 0 || pic.Faces != 0 {
+		t.Fatalf("a picture came with the error: %d bytes, %+v", len(pic.SVG), pic)
+	}
+	drawn, err := RenderWith(fixtures, jankomir, Options{DrawSparse: true})
+	if err != nil || len(drawn.SVG) == 0 || drawn.Buildings == 0 || drawn.Buildings >= MinBuildings {
+		t.Fatalf("asked for: %d bytes, %d buildings, %v", len(drawn.SVG), drawn.Buildings, err)
+	}
+	// It changes nothing for a place that has its picture.
+	split := places[0].Pin
+	a, errA := Render(fixtures, split)
+	b, errB := RenderWith(fixtures, split, Options{DrawSparse: true})
+	if errA != nil || errB != nil || !bytes.Equal(a.SVG, b.SVG) {
+		t.Fatalf("Split with and without DrawSparse: %v, %v, the same bytes %v", errA, errB, bytes.Equal(a.SVG, b.SVG))
+	}
+}
+
 func TestAPinOutsideTheTilesHasNoPicture(t *testing.T) {
 	if _, err := Render(fixtures, Pin{48.2082, 16.3738}); !errors.Is(err, ErrNoTiles) {
 		t.Fatalf("Vienna: %v", err)
@@ -395,8 +421,8 @@ func TestAPinOutsideTheTilesHasNoPicture(t *testing.T) {
 func TestTownsAreDrawnCloserThanVillages(t *testing.T) {
 	radius := map[string]float64{}
 	for _, p := range places {
-		pic, err := Render(fixtures, p.Pin)
-		if err != nil && !errors.Is(err, ErrTooSparse) {
+		pic, err := RenderWith(fixtures, p.Pin, Options{DrawSparse: true})
+		if err != nil {
 			t.Fatalf("%s: %v", p.Name, err)
 		}
 		if pic.Radius < MinRadius || pic.Radius > MaxRadius {

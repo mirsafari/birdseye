@@ -11,7 +11,7 @@ const (
 	// picture, so cached pictures are drawn again.
 	StyleVersion = 3
 
-	// MinBuildings is the fewest footprints worth a picture; with fewer
+	// MinBuildings is the fewest buildings worth a picture; with fewer
 	// Render answers ErrTooSparse, and a page is better off with an
 	// ordinary map.
 	MinBuildings = 40
@@ -35,8 +35,8 @@ var (
 	// ErrTooWide is an Options.Radius that would take more tiles than one
 	// picture reads (some kilometres; no place's own radius comes near).
 	ErrTooWide = errors.New("birdseye: the radius takes too many tiles")
-	// ErrTooSparse is a place with fewer than MinBuildings footprints in
-	// the disc. The picture comes back anyway, for a dev tool to look at.
+	// ErrTooSparse is a place with fewer than MinBuildings buildings in
+	// the disc: no picture, unless Options.DrawSparse asks for it.
 	ErrTooSparse = errors.New("birdseye: too few buildings around the pin")
 )
 
@@ -45,6 +45,10 @@ type Options struct {
 	// Radius in metres; zero is the place's own (placeRadius). One too
 	// wide to read is ErrTooWide.
 	Radius float64
+	// DrawSparse draws a place of fewer than MinBuildings buildings too,
+	// in place of ErrTooSparse, for a tool that looks at such pictures;
+	// Picture.Buildings says how many it has.
+	DrawSparse bool
 }
 
 // Picture is a rendered picture and what went into it.
@@ -58,7 +62,9 @@ type Picture struct {
 	Pinned    bool // a footprint holds the pin: the pinned building, in the --birdseye-pinned-* colours
 }
 
-// Render draws the picture around a pin.
+// Render draws the picture around a pin. With an error there is no
+// picture: ErrNoTiles and ErrTooSparse are places without one, anything
+// else a tile that could not be read.
 func Render(tiles Tiles, pin Pin) (Picture, error) {
 	return RenderWith(tiles, pin, Options{})
 }
@@ -84,8 +90,8 @@ func RenderWith(tiles Tiles, pin Pin, opts Options) (Picture, error) {
 		radius = placeRadius(sc.prisms)
 	}
 	pic := draw(sc, radius)
-	if pic.Buildings < MinBuildings {
-		return pic, ErrTooSparse
+	if pic.Buildings < MinBuildings && !opts.DrawSparse {
+		return Picture{}, ErrTooSparse
 	}
 	return pic, nil
 }

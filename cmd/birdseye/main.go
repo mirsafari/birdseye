@@ -100,19 +100,21 @@ func one(args []string) error {
 	}
 	defer src.Close()
 	start := time.Now()
-	pic, err := birdseye.RenderWith(src, birdseye.Pin{Lat: *lat, Lng: *lng}, birdseye.Options{Radius: *radius})
-	if err != nil && !errors.Is(err, birdseye.ErrTooSparse) {
+	pic, err := birdseye.RenderWith(src, birdseye.Pin{Lat: *lat, Lng: *lng}, birdseye.Options{Radius: *radius, DrawSparse: true})
+	if err != nil {
 		return err
 	}
-	fmt.Println(stats(pic, time.Since(start)), errText(err))
+	fmt.Println(stats(pic, time.Since(start)) + sparseNote(pic))
 	return os.WriteFile(*out, pic.SVG, 0o644)
 }
 
-func errText(err error) string {
-	if err == nil {
+// sparseNote says of a picture the tool drew anyway (Options.DrawSparse)
+// that an app gets none: Render answers ErrTooSparse there.
+func sparseNote(pic birdseye.Picture) string {
+	if pic.Buildings >= birdseye.MinBuildings {
 		return ""
 	}
-	return err.Error()
+	return "  (too sparse: a site shows a map)"
 }
 
 // cut copies the tiles every fixture place reads from an archive into a

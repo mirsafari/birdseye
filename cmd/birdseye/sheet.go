@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"html"
@@ -36,7 +35,7 @@ func sheet(args []string) error {
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(*out, "birdseye.css"), []byte(birdseye.Stylesheet), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(*out, "birdseye.css"), []byte(birdseye.Stylesheet()), 0o644); err != nil {
 		return err
 	}
 
@@ -48,14 +47,11 @@ func sheet(args []string) error {
 			radius float64
 		}{{p.Name + ".svg", 0}, {fmt.Sprintf("%s-%.0f.svg", p.Name, *beside), *beside}} {
 			start := time.Now()
-			pic, err := birdseye.RenderWith(src, p.Pin, birdseye.Options{Radius: v.radius})
-			if err != nil && !errors.Is(err, birdseye.ErrTooSparse) {
+			pic, err := birdseye.RenderWith(src, p.Pin, birdseye.Options{Radius: v.radius, DrawSparse: true})
+			if err != nil {
 				return fmt.Errorf("%s: %w", p.Name, err)
 			}
-			line := stats(pic, time.Since(start))
-			if err != nil {
-				line += "  (too sparse: a site shows a map)"
-			}
+			line := stats(pic, time.Since(start)) + sparseNote(pic)
 			fmt.Printf("%-20s %s\n", p.Name, line)
 			if err := os.WriteFile(filepath.Join(*out, v.file), pic.SVG, 0o644); err != nil {
 				return err
