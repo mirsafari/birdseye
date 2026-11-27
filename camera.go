@@ -64,3 +64,13 @@ func (c camera) foot() point { return point{0, -c.d} }
 // the projection turns it inside out and the back-to-front order, judged
 // from the foot, has no meaning.
 func southEdge(radius float64) float64 { return -radius * (1 + distanceRatio) / 2 }
+
+// tallest is the height above which no prism of a disc of this radius is
+// drawn: nine tenths of the height the camera stands at over the point it
+// aims at (209 m for the closest disc, 150 m around; 558 m for the
+// widest a place gets). A roof higher than the camera, south of the pin,
+// rises through the camera's own plane, where the projection turns it
+// inside out and throws its corners across the picture. No building in
+// Croatia comes near; a height mistyped in OpenStreetMap is whatever was
+// typed, and anybody can type one.
+func tallest(radius float64) float64 { return 0.9 * newCamera(radius, 0).h }

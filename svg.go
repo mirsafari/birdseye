@@ -2,8 +2,9 @@ package birdseye
 
 import (
 	"bytes"
+	"cmp"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 )
 
@@ -55,16 +56,7 @@ func (w *svgWriter) f(v float64) {
 
 // ring writes one closed subpath of frame points.
 func (w *svgWriter) ring(pts []point) {
-	for i, p := range pts {
-		if i == 0 {
-			w.buf.WriteByte('M')
-		} else {
-			w.buf.WriteByte('L')
-		}
-		w.f(p.x)
-		w.buf.WriteByte(',')
-		w.f(p.y)
-	}
+	w.line(pts)
 	w.buf.WriteByte('Z')
 }
 
@@ -153,11 +145,8 @@ func writeSVG(d *drawing, cam camera) []byte {
 			groups = append(groups, g)
 		}
 	}
-	sort.Slice(groups, func(a, b int) bool {
-		if groups[a].kind != groups[b].kind {
-			return groups[a].kind < groups[b].kind
-		}
-		return groups[a].width < groups[b].width
+	slices.SortFunc(groups, func(a, b group) int {
+		return cmp.Or(cmp.Compare(a.kind, b.kind), cmp.Compare(a.width, b.width))
 	})
 	for _, g := range groups {
 		col := colRoad
@@ -225,7 +214,7 @@ func (w *svgWriter) prism(p *prism, foot point) int {
 			})
 		}
 	}
-	sort.SliceStable(walls, func(i, j int) bool { return walls[i].dist > walls[j].dist })
+	slices.SortStableFunc(walls, func(a, b wall) int { return cmp.Compare(b.dist, a.dist) })
 
 	fills, roof, edge := colWalls, colRoof, colEdge
 	if p.pinned {

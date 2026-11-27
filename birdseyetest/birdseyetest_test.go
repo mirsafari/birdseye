@@ -16,7 +16,7 @@ func TestFixturesDrawEveryPlace(t *testing.T) {
 		t.Fatalf("%d places", len(birdseyetest.Places))
 	}
 	for i, p := range birdseyetest.Places {
-		pic, err := birdseye.Render(tiles, p.Pin)
+		pic, err := birdseye.Render(t.Context(), tiles, p.Pin)
 		last := i == len(birdseyetest.Places)-1
 		if last != errors.Is(err, birdseye.ErrTooSparse) || (!last && err != nil) {
 			t.Errorf("%s: %v", p.Name, err)
@@ -31,7 +31,7 @@ func TestFixturesDrawEveryPlace(t *testing.T) {
 	if birdseyetest.Named("varazdin-centre") != birdseyetest.Places[2] {
 		t.Error("Named does not find Varaždin")
 	}
-	if _, err := birdseye.Render(tiles, birdseye.Pin{Lat: 48.2082, Lng: 16.3738}); !errors.Is(err, birdseye.ErrNoTiles) {
+	if _, err := birdseye.Render(t.Context(), tiles, birdseye.Pin{Lat: 48.2082, Lng: 16.3738}); !errors.Is(err, birdseye.ErrNoTiles) {
 		t.Errorf("Vienna: %v", err)
 	}
 }

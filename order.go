@@ -1,9 +1,10 @@
 package birdseye
 
 import (
+	"cmp"
 	"container/heap"
 	"math"
-	"sort"
+	"slices"
 )
 
 // order sorts the prisms back to front for the painter, and returns how
@@ -21,7 +22,7 @@ func order(prisms []*prism, foot point) int {
 		lo, hi := math.Inf(1), math.Inf(-1)
 		for _, q := range p.outer.pts {
 			a := math.Atan2(q.x-foot.x, q.y-foot.y)
-			lo, hi = math.Min(lo, a), math.Max(hi, a)
+			lo, hi = min(lo, a), max(hi, a)
 		}
 		p.az0, p.az1 = lo, hi
 		c := centroid(p.outer.pts)
@@ -31,7 +32,7 @@ func order(prisms []*prism, foot point) int {
 	for i := range idx {
 		idx[i] = i
 	}
-	sort.SliceStable(idx, func(a, b int) bool { return prisms[idx[a]].az0 < prisms[idx[b]].az0 })
+	slices.SortStableFunc(idx, func(a, b int) int { return cmp.Compare(prisms[a].az0, prisms[b].az0) })
 
 	after := make([][]int, n) // after[i]: the prisms drawn after i
 	indeg := make([]int, n)
@@ -42,7 +43,7 @@ func order(prisms []*prism, foot point) int {
 			if pj.az0 >= pi.az1 {
 				break
 			}
-			lo, hi := math.Max(pi.az0, pj.az0), math.Min(pi.az1, pj.az1)
+			lo, hi := max(pi.az0, pj.az0), min(pi.az1, pj.az1)
 			if hi-lo < 1e-5 {
 				continue
 			}

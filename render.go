@@ -1,15 +1,17 @@
 package birdseye
 
 import (
+	"cmp"
+	"context"
 	"errors"
 	"math"
-	"sort"
+	"slices"
 )
 
 const (
 	// StyleVersion changes whenever the same tiles and pin draw a different
 	// picture, so cached pictures are drawn again.
-	StyleVersion = 3
+	StyleVersion = 4
 
 	// MinBuildings is the fewest buildings worth a picture; with fewer
 	// Render answers ErrTooSparse, and a page is better off with an
@@ -23,6 +25,15 @@ const (
 	MaxRadius = 400.0
 	BuiltArea = 25000.0
 
+	// WidestRadius is the widest Options.Radius drawn, in metres; a wider
+	// one is ErrTooWide. A drawing's time and size grow with the buildings
+	// in its disc: around central Zagreb, 730 of them at 400 m (21 ms, a
+	// 450 KB picture), 3,400 at 1,000 m (70 ms, 1.9 MB) and 22,000 at
+	// 3,000 m (half a second, 10 MB). No place's own radius is over
+	// MaxRadius; an app that takes a radius from outside checks it against
+	// this.
+	WidestRadius = 1000.0
+
 	// reachMargin is how far beyond the radius tiles are read, for the
 	// footprints whose centre is inside the disc and whose walls are not.
 	reachMargin = 60.0
@@ -32,9 +43,8 @@ var (
 	// ErrNoTiles is a pin outside the tiles, or off the map altogether
 	// (beyond Web Mercator's 85.05° north or south, or not a number).
 	ErrNoTiles = errors.New("birdseye: no tiles cover the pin")
-	// ErrTooWide is an Options.Radius that would take more tiles than one
-	// picture reads (some kilometres; no place's own radius comes near).
-	ErrTooWide = errors.New("birdseye: the radius takes too many tiles")
+	// ErrTooWide is an Options.Radius over WidestRadius.
+	ErrTooWide = errors.New("birdseye: the radius is too wide to draw")
 	// ErrTooSparse is a place with fewer than MinBuildings buildings in
 	// the disc: no picture, unless Options.DrawSparse asks for it.
 	ErrTooSparse = errors.New("birdseye: too few buildings around the pin")
@@ -42,8 +52,8 @@ var (
 
 // Options vary a picture; the zero value is the picture as designed.
 type Options struct {
-	// Radius in metres; zero is the place's own (placeRadius). One too
-	// wide to read is ErrTooWide.
+	// Radius in metres, up to WidestRadius; zero is the place's own
+	// (placeRadius). A wider one is ErrTooWide.
 	Radius float64
 	// DrawSparse draws a place of fewer than MinBuildings buildings too,
 	// in place of ErrTooSparse, for a tool that looks at such pictures;
@@ -63,23 +73,28 @@ type Picture struct {
 }
 
 // Render draws the picture around a pin. With an error there is no
-// picture: ErrNoTiles and ErrTooSparse are places without one, anything
-// else a tile that could not be read.
-func Render(tiles Tiles, pin Pin) (Picture, error) {
-	return RenderWith(tiles, pin, Options{})
+// picture: ErrNoTiles and ErrTooSparse are places without one, the
+// context's error a drawing given up (between two tiles, or before the
+// picture is drawn from them), anything else a tile that could not be
+// read.
+func Render(ctx context.Context, tiles Tiles, pin Pin) (Picture, error) {
+	return RenderWith(ctx, tiles, pin, Options{})
 }
 
 // RenderWith draws the picture with options.
-func RenderWith(tiles Tiles, pin Pin, opts Options) (Picture, error) {
+func RenderWith(ctx context.Context, tiles Tiles, pin Pin, opts Options) (Picture, error) {
 	if !pin.onMap() {
 		return Picture{}, ErrNoTiles
 	}
 	radius := opts.Radius
+	if radius > WidestRadius {
+		return Picture{}, ErrTooWide
+	}
 	reach := MaxRadius + reachMargin
 	if radius > 0 {
 		reach = radius + reachMargin
 	}
-	sc, found, err := loadScene(tiles, pin, reach)
+	sc, found, err := loadScene(ctx, tiles, pin, reach)
 	if err != nil {
 		return Picture{}, err
 	}
@@ -88,6 +103,9 @@ func RenderWith(tiles Tiles, pin Pin, opts Options) (Picture, error) {
 	}
 	if !(radius > 0) { // zero, negative or not a number
 		radius = placeRadius(sc.prisms)
+	}
+	if err := ctx.Err(); err != nil {
+		return Picture{}, err
 	}
 	pic := draw(sc, radius)
 	if pic.Buildings < MinBuildings && !opts.DrawSparse {
@@ -113,7 +131,9 @@ func placeRadius(prisms []*prism) float64 {
 		c := centroid(p.outer.pts)
 		ns[i] = near{math.Hypot(c.x, c.y), footprint(p), p.whole()}
 	}
-	sort.Slice(ns, func(i, j int) bool { return ns[i].dist < ns[j].dist })
+	// Stable, so footprints at one distance (the parts of a tower) keep
+	// the tiles' order whatever the sort's algorithm.
+	slices.SortStableFunc(ns, func(a, b near) int { return cmp.Compare(a.dist, b.dist) })
 	r := MaxRadius
 	built := 0.0
 	buildings := map[*prism]bool{}
@@ -125,7 +145,7 @@ func placeRadius(prisms []*prism) float64 {
 			break
 		}
 	}
-	return math.Max(MinRadius, math.Min(MaxRadius, r))
+	return max(MinRadius, min(MaxRadius, r))
 }
 
 // footprint is a prism's ground area in square metres, courtyards
@@ -139,14 +159,16 @@ func footprint(p *prism) float64 {
 }
 
 // draw cuts the scene to the disc, finds the pinned building, orders the prisms and
-// writes the picture. It cuts the scene's prisms in place, so a scene is
-// drawn once.
+// writes the picture. It cuts the scene's prisms in place (to the ground
+// north of southEdge, and to the height the camera can see, tallest), so
+// a scene is drawn once.
 func draw(sc scene, radius float64) Picture {
 	d := &drawing{radius: radius}
 	target := 0.0
 	guessed := 0
 	origin := point{}
 	south := southEdge(radius)
+	top := tallest(radius)
 	buildings := map[*prism]bool{} // the buildings in the disc; true for the pinned one
 	for _, p := range sc.prisms {
 		c := centroid(p.outer.pts)
@@ -157,8 +179,10 @@ func draw(sc scene, radius float64) Picture {
 		if !p.cutNorthOf(south) {
 			continue
 		}
+		// Before the camera is aimed: it aims at the pinned roof.
+		p.lowerTo(top)
 		if holdsPin {
-			target = math.Max(target, p.z1)
+			target = max(target, p.z1)
 		}
 		b := p.whole()
 		if _, seen := buildings[b]; !seen && p.guessed {
@@ -190,7 +214,7 @@ func draw(sc scene, radius float64) Picture {
 				continue
 			}
 			if a := area(c); (i == 0) != (a > 0) {
-				reverse(c)
+				slices.Reverse(c)
 			}
 			rings = append(rings, c)
 		}
@@ -230,10 +254,4 @@ func holds(pr *prism, p point) bool {
 		}
 	}
 	return true
-}
-
-func reverse(pts []point) {
-	for i, j := 0, len(pts)-1; i < j; i, j = i+1, j-1 {
-		pts[i], pts[j] = pts[j], pts[i]
-	}
 }

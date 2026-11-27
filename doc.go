@@ -34,6 +34,21 @@
 //     for: one off the map (towards a pole, or not a number) is
 //     ErrNoTiles, and no picture reads more than a few tiles.
 //
+// # What an app relies on
+//
+// A drawing reads the tiles around the pin (four of them in most places),
+// takes some milliseconds and allocates some megabytes on the way: 13 ms
+// and 21 MB for a 60 KB picture of central Zagreb. An app that draws on
+// demand therefore draws a pin once: views of a pin that is being drawn
+// wait for that drawing instead of each starting their own, or a burst of
+// first views is as many drawings at once.
+//
+// Render takes a context and gives up, with the context's error, between
+// two tiles once it is done. A Tiles answers a tile it does not hold with
+// an error that is fs.ErrNotExist, as a file system does for a missing
+// file, so FSTiles is fs.ReadFile and a source of one's own says "missing"
+// the way the standard library does.
+//
 // OpenStreetMap's data is under the ODbL and the OpenMapTiles schema under
 // CC-BY: a page showing the picture credits "© OpenMapTiles
 // © OpenStreetMap contributors".

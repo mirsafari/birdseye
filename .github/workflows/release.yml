@@ -1,6 +1,13 @@
 # On a version tag (v1.2.3): test, build the Croatia tile archive with
 # Planetiler, and publish both on the tag's release. Apps download the
 # archive from the release's URL and check it against its .sha256.
+#
+# The job may write to the repository (it publishes the release), so the
+# actions it runs are pinned by commit, as the Planetiler image is by
+# digest: a tag such as v5 can be moved to other code, a commit cannot.
+# To move to a newer one, take the commit of its release
+# (gh api repos/actions/checkout/commits/v5.1.0 --jq .sha) and name the
+# release in the comment beside it.
 name: release
 
 on:
@@ -14,8 +21,8 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
           cache: false # no dependencies, no go.sum

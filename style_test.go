@@ -13,7 +13,7 @@ import (
 func TestStylesheetSetsEveryColourThePictureReads(t *testing.T) {
 	used := map[string]bool{}
 	for _, p := range places {
-		pic, err := RenderWith(fixtures, p.Pin, Options{DrawSparse: true})
+		pic, err := RenderWith(t.Context(), fixtures, p.Pin, Options{DrawSparse: true})
 		if err != nil {
 			t.Fatalf("%s: %v", p.Name, err)
 		}

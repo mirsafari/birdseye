@@ -18,12 +18,12 @@ page's own HTML at a fixed point. `scripts/screenshot.sh` redraws these.
 ```go
 archive, err := pmtiles.Open("croatia-z14.pmtiles")
 // ...
-pic, err := birdseye.Render(archive, birdseye.Pin{Lat: 45.0827, Lng: 13.6312})
+pic, err := birdseye.Render(ctx, archive, birdseye.Pin{Lat: 45.0827, Lng: 13.6312})
 switch {
 case errors.Is(err, birdseye.ErrNoTiles), errors.Is(err, birdseye.ErrTooSparse):
 	// no picture worth showing here: show an ordinary map
 case err != nil:
-	// a read error
+	// a read error, or ctx was done before the drawing was
 }
 // with an error there is no picture; otherwise
 // pic.SVG: about 40 to 330 KB, 8 to 56 KB gzipped; 1 to 16 ms to draw
@@ -41,10 +41,14 @@ On the page:
 
 The picture is a pure function of the tiles, the pin and `StyleVersion`, so
 nothing needs storing: draw on the first view and keep the bytes in memory,
-keyed by the pin, and use a hash of the SVG as the address's version. The
+keyed by the pin, and use a hash of the SVG as the address's version. Draw
+a pin once, though: a drawing allocates some megabytes on the way to its
+kilobytes, so views of a pin that is being drawn should wait for that
+drawing instead of each starting their own. The
 package documentation (`go doc github.com/mirsafari/birdseye`) lists what
 a page can rely on: the group id, the 14 CSS colour variables, where the
-pin lands, and when there is no picture.
+pin lands, and when there is no picture; and what an app can: the cost of
+a drawing, the context, and how a tile source says a tile is missing.
 
 ## Packages
 

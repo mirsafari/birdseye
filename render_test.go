@@ -3,14 +3,19 @@ package birdseye
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fixtures and places are birdseyetest's, read from its directory: these
@@ -129,7 +134,7 @@ func TestDecodeTileRefusesTruncatedBytes(t *testing.T) {
 
 func TestDecodeFixtureTile(t *testing.T) {
 	id := tilesAround(newFrame(places[2].Pin), 1)[0] // Varaždin's centre
-	data, err := fixtures.Tile(Zoom, id.x, id.y)
+	data, err := fixtures.Tile(t.Context(), Zoom, id.x, id.y)
 	if err != nil || data == nil {
 		t.Fatalf("fixture %v: %v", id, err)
 	}
@@ -146,10 +151,77 @@ func TestDecodeFixtureTile(t *testing.T) {
 	}
 }
 
-func TestMissingTileIsNil(t *testing.T) {
-	data, err := fixtures.Tile(Zoom, 0, 0)
-	if data != nil || err != nil {
-		t.Fatalf("missing tile = %v, %v", data, err)
+// TestAMissingTileIsNotExist: a tile a source does not hold is the file
+// system's fs.ErrNotExist, and a pin with none of its tiles is ErrNoTiles.
+func TestAMissingTileIsNotExist(t *testing.T) {
+	data, err := fixtures.Tile(t.Context(), Zoom, 0, 0)
+	if data != nil || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing tile = %v, %v, want fs.ErrNotExist", data, err)
+	}
+	asked := 0
+	none := tilesFunc(func(context.Context, int, int, int) ([]byte, error) {
+		asked++
+		return nil, fmt.Errorf("no such tile: %w", fs.ErrNotExist)
+	})
+	if _, err := Render(t.Context(), none, places[0].Pin); !errors.Is(err, ErrNoTiles) || asked == 0 {
+		t.Errorf("a source without the pin's tiles: %v after %d tiles, want ErrNoTiles", err, asked)
+	}
+}
+
+// TestATileOfNoBytesIsATile: bytes with no error are a tile, also when
+// there are none of them (an archive entry of length zero), so the pin is
+// covered and has too few buildings, not no tiles. Nil and empty are the
+// same: a source cannot say "missing" by which of the two it returns.
+func TestATileOfNoBytesIsATile(t *testing.T) {
+	for name, data := range map[string][]byte{"nil": nil, "empty": {}} {
+		blank := tilesFunc(func(context.Context, int, int, int) ([]byte, error) { return data, nil })
+		if _, err := Render(t.Context(), blank, places[0].Pin); !errors.Is(err, ErrTooSparse) {
+			t.Errorf("%s tiles with no error: %v, want ErrTooSparse", name, err)
+		}
+	}
+}
+
+// TestADrawingStopsWhenItsContextDoes: a context that is done reads
+// nothing, one that ends while the tiles are read stops before the next
+// tile, whether or not the source looks at it, and the error is the
+// context's.
+func TestADrawingStopsWhenItsContextDoes(t *testing.T) {
+	pin := places[1].Pin // Zagreb: more than one tile
+	if n := len(TilesFor(pin)); n < 2 {
+		t.Fatalf("the place reads %d tiles: the test needs two", n)
+	}
+	done, cancel := context.WithCancel(t.Context())
+	cancel()
+	asked := 0
+	counting := tilesFunc(func(ctx context.Context, z, x, y int) ([]byte, error) {
+		asked++
+		return fixtures.Tile(context.Background(), z, x, y) // a source that ignores its context
+	})
+	if _, err := Render(done, counting, pin); !errors.Is(err, context.Canceled) || asked != 0 {
+		t.Errorf("a context already done: %v after %d tiles, want context.Canceled and none", err, asked)
+	}
+	if _, err := fixtures.Tile(done, Zoom, 0, 0); !errors.Is(err, context.Canceled) {
+		t.Errorf("a tile read with a context already done: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	asked = 0
+	stopping := tilesFunc(func(_ context.Context, z, x, y int) ([]byte, error) {
+		asked++
+		cancel() // the request went away while the first tile was read
+		return fixtures.Tile(context.Background(), z, x, y)
+	})
+	pic, err := Render(ctx, stopping, pin)
+	if !errors.Is(err, context.Canceled) || asked != 1 || pic.SVG != nil {
+		t.Errorf("a context done after the first tile: %v after %d tiles with %d bytes, want context.Canceled, one and none", err, asked, len(pic.SVG))
+	}
+
+	// A deadline is the same, in its own word.
+	late, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, err := Render(late, fixtures, pin); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a deadline already past: %v", err)
 	}
 }
 
@@ -297,6 +369,103 @@ func TestClipRectMarksTheTileEdgeAsCut(t *testing.T) {
 	}
 }
 
+// TestAClippedLineComesBackInItsPieces: a line that leaves the window and
+// comes back is two pieces, cut where it crosses, and what runs on inside
+// stays one.
+func TestAClippedLineComesBackInItsPieces(t *testing.T) {
+	// Along y=50: in, out past the east side, back in, and on inside.
+	line := []tpoint{{10, 50}, {90, 50}, {150, 50}, {150, 60}, {90, 60}, {10, 60}}
+	got := clipLineRect(line, 100)
+	want := [][]tpoint{{{10, 50}, {90, 50}, {100, 50}}, {{100, 60}, {90, 60}, {10, 60}}}
+	if len(got) != len(want) || !slices.Equal(got[0], want[0]) || !slices.Equal(got[1], want[1]) {
+		t.Errorf("clipLineRect = %v, want %v", got, want)
+	}
+	if got := clipLineRect([]tpoint{{150, 10}, {150, 90}}, 100); got != nil {
+		t.Errorf("a line outside the square left %v", got)
+	}
+
+	// The same across a circle of 100 m: the chord's ends are on it.
+	street := []point{{-50, 0}, {50, 0}, {150, 0}, {150, 60}, {50, 60}, {-50, 60}}
+	parts := clipLineCircle(street, 100)
+	if len(parts) != 2 || len(parts[0]) != 3 || len(parts[1]) != 3 {
+		t.Fatalf("clipLineCircle = %v, want two pieces of three points", parts)
+	}
+	if end, start := parts[0][2], parts[1][0]; math.Abs(end.x-100) > 1e-9 || end.y != 0 || math.Abs(start.x-80) > 1e-9 || start.y != 60 {
+		t.Errorf("the pieces end at %v and start again at %v, want (100, 0) and (80, 60)", end, start)
+	}
+	// A point repeated along the line breaks nothing.
+	if got := clipLineCircle([]point{{-10, 0}, {-10, 0}, {10, 0}}, 100); len(got) != 1 || len(got[0]) != 2 {
+		t.Errorf("a line with a repeated point = %v", got)
+	}
+}
+
+// TestARingInsideItsTileIsWhatClippingWouldLeave: clipRect does not clip
+// a ring that stands inside the tile's square, and gives exactly what
+// clipping it gave, for every ring of every fixture tile.
+func TestARingInsideItsTileIsWhatClippingWouldLeave(t *testing.T) {
+	inside, reaching := 0, 0
+	seen := map[[3]int]bool{}
+	for _, p := range places {
+		for _, id := range TilesFor(p.Pin) {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			data, err := fixtures.Tile(t.Context(), id[0], id[1], id[2])
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			ls, err := decodeTile(data, layers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, l := range ls {
+				for _, f := range l.features {
+					if f.kind != geomPolygon {
+						continue
+					}
+					paths, err := f.paths()
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, path := range paths {
+						r := openRing(path)
+						if insideSquare(r, l.extent) {
+							inside++
+						} else {
+							reaching++
+						}
+						got, gotCut := clipRect(r, l.extent)
+						want, wantCut := clipSides(r, l.extent)
+						if !slices.Equal(got, want) || !slices.Equal(gotCut, wantCut) {
+							t.Fatalf("tile %v, layer %s: clipRect gives %v %v, clipping %v %v", id, name, got, gotCut, want, wantCut)
+						}
+					}
+				}
+			}
+		}
+	}
+	if inside == 0 || reaching == 0 {
+		t.Fatalf("%d rings inside their tile and %d reaching its edge: the test compares nothing", inside, reaching)
+	}
+	t.Logf("%d rings inside their tile, %d reaching its edge", inside, reaching)
+
+	// On a side is not inside: the edge along it is a cut.
+	if _, cut := clipRect([]tpoint{{0, 100}, {50, 100}, {50, 200}, {0, 200}}, 4096); !slices.Contains(cut, true) {
+		t.Error("a ring with an edge on the tile's side has no cut edge")
+	}
+	// Repeated points go, as clipping drops them.
+	if pts, _ := clipRect([]tpoint{{10, 10}, {10, 10}, {20, 10}, {20, 20}, {10, 10}}, 4096); len(pts) != 3 {
+		t.Errorf("a ring with repeated points keeps %v", pts)
+	}
+	if pts, _ := clipRect([]tpoint{{10, 10}, {20, 10}}, 4096); pts != nil {
+		t.Errorf("two points make a ring: %v", pts)
+	}
+}
+
 func TestACutEdgeDrawsNoWallAndNoOutline(t *testing.T) {
 	cam := newCamera(360, 0)
 	// The west half of a building cut along x = 0 by a tile edge: the cut
@@ -347,7 +516,7 @@ func TestEveryPlaceRendersInOrder(t *testing.T) {
 	}
 	for _, p := range places {
 		// Drawn whatever its density, so the sparse place is counted too.
-		pic, err := RenderWith(fixtures, p.Pin, Options{DrawSparse: true})
+		pic, err := RenderWith(t.Context(), fixtures, p.Pin, Options{DrawSparse: true})
 		if err != nil {
 			t.Fatalf("%s: %v", p.Name, err)
 		}
@@ -374,11 +543,11 @@ func TestEveryPlaceRendersInOrder(t *testing.T) {
 
 func TestTheSameInputDrawsTheSameBytes(t *testing.T) {
 	pin := places[0].Pin
-	a, err := Render(fixtures, pin)
+	a, err := Render(t.Context(), fixtures, pin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Render(fixtures, pin)
+	b, err := Render(t.Context(), fixtures, pin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,28 +561,28 @@ func TestTheSameInputDrawsTheSameBytes(t *testing.T) {
 // rather than a few sheds; a tool that wants to see them says so.
 func TestASparsePlaceHasNoPictureUnlessAskedFor(t *testing.T) {
 	jankomir := places[len(places)-1].Pin
-	pic, err := Render(fixtures, jankomir)
+	pic, err := Render(t.Context(), fixtures, jankomir)
 	if !errors.Is(err, ErrTooSparse) {
 		t.Fatalf("Jankomir: %v, want ErrTooSparse", err)
 	}
 	if pic.SVG != nil || pic.Buildings != 0 || pic.Radius != 0 || pic.Faces != 0 {
 		t.Fatalf("a picture came with the error: %d bytes, %+v", len(pic.SVG), pic)
 	}
-	drawn, err := RenderWith(fixtures, jankomir, Options{DrawSparse: true})
+	drawn, err := RenderWith(t.Context(), fixtures, jankomir, Options{DrawSparse: true})
 	if err != nil || len(drawn.SVG) == 0 || drawn.Buildings == 0 || drawn.Buildings >= MinBuildings {
 		t.Fatalf("asked for: %d bytes, %d buildings, %v", len(drawn.SVG), drawn.Buildings, err)
 	}
 	// It changes nothing for a place that has its picture.
 	split := places[0].Pin
-	a, errA := Render(fixtures, split)
-	b, errB := RenderWith(fixtures, split, Options{DrawSparse: true})
+	a, errA := Render(t.Context(), fixtures, split)
+	b, errB := RenderWith(t.Context(), fixtures, split, Options{DrawSparse: true})
 	if errA != nil || errB != nil || !bytes.Equal(a.SVG, b.SVG) {
 		t.Fatalf("Split with and without DrawSparse: %v, %v, the same bytes %v", errA, errB, bytes.Equal(a.SVG, b.SVG))
 	}
 }
 
 func TestAPinOutsideTheTilesHasNoPicture(t *testing.T) {
-	if _, err := Render(fixtures, Pin{48.2082, 16.3738}); !errors.Is(err, ErrNoTiles) {
+	if _, err := Render(t.Context(), fixtures, Pin{48.2082, 16.3738}); !errors.Is(err, ErrNoTiles) {
 		t.Fatalf("Vienna: %v", err)
 	}
 }
@@ -421,7 +590,7 @@ func TestAPinOutsideTheTilesHasNoPicture(t *testing.T) {
 func TestTownsAreDrawnCloserThanVillages(t *testing.T) {
 	radius := map[string]float64{}
 	for _, p := range places {
-		pic, err := RenderWith(fixtures, p.Pin, Options{DrawSparse: true})
+		pic, err := RenderWith(t.Context(), fixtures, p.Pin, Options{DrawSparse: true})
 		if err != nil {
 			t.Fatalf("%s: %v", p.Name, err)
 		}
@@ -445,7 +614,7 @@ func TestTownsAreDrawnCloserThanVillages(t *testing.T) {
 		}
 	}
 
-	fixed, err := RenderWith(fixtures, places[0].Pin, Options{Radius: 360})
+	fixed, err := RenderWith(t.Context(), fixtures, places[0].Pin, Options{Radius: 360})
 	if err != nil || fixed.Radius != 360 {
 		t.Fatalf("a fixed radius: %.0f, %v", fixed.Radius, err)
 	}
@@ -464,21 +633,21 @@ func TestThePinIsWhereTheCameraAims(t *testing.T) {
 }
 
 // tilesFunc is a tile source in a function.
-type tilesFunc func(z, x, y int) ([]byte, error)
+type tilesFunc func(ctx context.Context, z, x, y int) ([]byte, error)
 
-func (f tilesFunc) Tile(z, x, y int) ([]byte, error) { return f(z, x, y) }
+func (f tilesFunc) Tile(ctx context.Context, z, x, y int) ([]byte, error) { return f(ctx, z, x, y) }
 
 // TestAPinOffTheMapHasNoPictureAndReadsNoTiles: towards a pole a metre
 // spans ever more of the world, and the tiles around a pin there were
 // listed without end (7 GB of them at 89.999°) before one was read.
 func TestAPinOffTheMapHasNoPictureAndReadsNoTiles(t *testing.T) {
 	read := 0
-	counting := tilesFunc(func(z, x, y int) ([]byte, error) { read++; return nil, nil })
+	counting := tilesFunc(func(context.Context, int, int, int) ([]byte, error) { read++; return nil, fs.ErrNotExist })
 	for _, pin := range []Pin{
 		{89.999, 16}, {90, 16}, {-90, 16}, {85.06, 16}, {45, 181}, {45, -181},
 		{math.NaN(), 16}, {45, math.NaN()}, {math.Inf(1), 16}, {45, math.Inf(-1)},
 	} {
-		if _, err := Render(counting, pin); !errors.Is(err, ErrNoTiles) {
+		if _, err := Render(t.Context(), counting, pin); !errors.Is(err, ErrNoTiles) {
 			t.Errorf("%v: %v, want ErrNoTiles", pin, err)
 		}
 		if got := TilesFor(pin); got != nil {
@@ -492,28 +661,49 @@ func TestAPinOffTheMapHasNoPictureAndReadsNoTiles(t *testing.T) {
 	if n := len(TilesFor(Pin{maxLatitude, 16})); n == 0 || n > 36 {
 		t.Errorf("a pin at Web Mercator's edge lists %d tiles", n)
 	}
-	if _, err := Render(counting, Pin{maxLatitude, 16}); !errors.Is(err, ErrNoTiles) || read == 0 {
+	if _, err := Render(t.Context(), counting, Pin{maxLatitude, 16}); !errors.Is(err, ErrNoTiles) || read == 0 {
 		t.Errorf("a pin at Web Mercator's edge: %v after %d tiles", err, read)
 	}
 }
 
-func TestARadiusTooWideToReadIsRefused(t *testing.T) {
+// TestARadiusTooWideIsRefused: a drawing's cost grows with its disc, so a
+// radius over WidestRadius is refused before a tile is read; the widest
+// one let through is drawn, from a list of tiles within the budget
+// wherever the pin is.
+func TestARadiusTooWideIsRefused(t *testing.T) {
 	pin := places[0].Pin
-	for _, radius := range []float64{1e6, 1e12, math.Inf(1)} {
-		if _, err := RenderWith(fixtures, pin, Options{Radius: radius}); !errors.Is(err, ErrTooWide) {
+	read := 0
+	counting := tilesFunc(func(ctx context.Context, z, x, y int) ([]byte, error) {
+		read++
+		return fixtures.Tile(ctx, z, x, y)
+	})
+	for _, radius := range []float64{WidestRadius + 1, 3000, 1e6, 1e12, math.Inf(1)} {
+		if _, err := RenderWith(t.Context(), counting, pin, Options{Radius: radius}); !errors.Is(err, ErrTooWide) {
 			t.Errorf("radius %v: %v, want ErrTooWide", radius, err)
+		}
+	}
+	if read != 0 {
+		t.Errorf("%d tiles were read for radii that are refused", read)
+	}
+	widest, err := RenderWith(t.Context(), counting, pin, Options{Radius: WidestRadius})
+	if err != nil || widest.Radius != WidestRadius || read == 0 {
+		t.Errorf("the widest radius: drawn %v m around after %d tiles (%v)", widest.Radius, read, err)
+	}
+	for _, at := range []Pin{pin, {maxLatitude, 16}, {-maxLatitude, 16}, {0, 0}} {
+		if n := len(tilesAround(newFrame(at), WidestRadius+reachMargin)); n == 0 || n > 144 {
+			t.Errorf("%v: the widest radius lists %d tiles, want some and at most 144", at, n)
 		}
 	}
 	if ids := tilesAround(newFrame(pin), 1e9); ids != nil {
 		t.Errorf("%d tiles listed for a reach of a million kilometres", len(ids))
 	}
 	// A radius that is no number at all is the place's own.
-	own, err := Render(fixtures, pin)
+	own, err := Render(t.Context(), fixtures, pin)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, radius := range []float64{math.NaN(), -5} {
-		pic, err := RenderWith(fixtures, pin, Options{Radius: radius})
+		pic, err := RenderWith(t.Context(), fixtures, pin, Options{Radius: radius})
 		if err != nil || pic.Radius != own.Radius {
 			t.Errorf("radius %v: drawn %v m around (%v), want the place's %v", radius, pic.Radius, err, own.Radius)
 		}
@@ -556,10 +746,161 @@ func edgeScene(t *testing.T) scene {
 		t.Fatal(err)
 	}
 	joinParts(sc.prisms)
+	evenHeights(sc.prisms)
 	if len(sc.prisms) != 6 {
 		t.Fatalf("%d prisms, want each building's two halves", len(sc.prisms))
 	}
 	return sc
+}
+
+// rect is a polygon feature's geometry like square's, w by h.
+func rect(x, y, w, h int32) []uint32 {
+	return []uint32{
+		1 | 1<<3, zz(x), zz(y),
+		2 | 3<<3, zz(w), 0, 0, zz(h), zz(-w), 0,
+		7 | 1<<3,
+	}
+}
+
+// TestTheSidesOfACutBuildingAreOneHeight: a hall without a height in the
+// map runs 300 tile units into the west tile and 40 into the east one.
+// Each tile carries its own side and 64 units of the other (its buffer)
+// and guesses a height from that: 11 m west of the edge, 9.5 m east of
+// it, a step in the roof with no wall under it. The hall is one height,
+// guessed from its whole footprint.
+func TestTheSidesOfACutBuildingAreOneHeight(t *testing.T) {
+	const extent, buffer = 4096, 64
+	n := float64(int(1) << Zoom)
+	west, east := tileID{8900, 5900}, tileID{8901, 5900}
+	wx := (float64(west.x) + float64(extent-5)/extent) / n
+	wy := (float64(west.y) + 2000.0/extent) / n
+	fr := newFrame(Pin{Lat: math.Atan(math.Sinh(math.Pi*(1-2*wy))) * 180 / math.Pi, Lng: wx*360 - 180})
+	hall := func(geometry []uint32) map[string]*layer {
+		return map[string]*layer{"building": {extent: extent, features: []feature{
+			{kind: geomPolygon, geometry: geometry, props: map[string]any{"render_height": int64(schemaDefaultHeight)}},
+		}}}
+	}
+	var sc scene
+	// The west tile has all of the hall: its 40 units east are in the buffer.
+	if err := sc.add(fr, west, hall(rect(extent-300, 1985, 340, 30)), 460); err != nil {
+		t.Fatal(err)
+	}
+	// The east tile has those 40 units and 64 of the 300 west of its edge.
+	if err := sc.add(fr, east, hall(rect(-buffer, 1985, buffer+40, 30)), 460); err != nil {
+		t.Fatal(err)
+	}
+	if len(sc.prisms) != 2 {
+		t.Fatalf("%d prisms, want the hall's two sides", len(sc.prisms))
+	}
+	w, e := sc.prisms[0], sc.prisms[1]
+	if w.z1 != 11 || e.z1 != 9.5 || !w.guessed || !e.guessed {
+		t.Fatalf("the tiles guess %v and %v m, want 11 and 9.5: the test shows nothing", w.z1, e.z1)
+	}
+	joinParts(sc.prisms)
+	evenHeights(sc.prisms)
+	if w.whole() != e.whole() {
+		t.Fatal("the two sides are not one building")
+	}
+	if w.z1 != 11 || e.z1 != 11 {
+		t.Errorf("the sides stand %v and %v m, want both at 11, the guess for the whole hall", w.z1, e.z1)
+	}
+
+	// A height the map states is left alone, part by part.
+	for _, p := range edgeScene(t).prisms {
+		if want := map[float64]float64{0: 12, 12: 20}[p.z0]; p.z1 != want || p.guessed {
+			t.Errorf("a part from %v m up stands %v m (guessed %v), want %v as the map says", p.z0, p.z1, p.guessed, want)
+		}
+	}
+
+	// And in every fixture place: no building in parts of two heights.
+	inParts := 0
+	for _, p := range places {
+		sc, _, err := loadScene(t.Context(), fixtures, p.Pin, MaxRadius+reachMargin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tops := map[*prism]float64{}
+		for _, pr := range sc.prisms {
+			if !pr.guessed || (pr.of == nil && !pr.outer.hasCut()) {
+				continue
+			}
+			b := pr.whole()
+			if top, seen := tops[b]; seen && top != pr.z1 {
+				t.Errorf("%s: a building's parts stand %v and %v m", p.Name, top, pr.z1)
+			}
+			tops[b] = pr.z1
+			if pr.of != nil {
+				inParts++
+			}
+		}
+	}
+	if inParts == 0 {
+		t.Error("no fixture building is in parts: the fixtures check nothing")
+	}
+}
+
+// TestNoRoofRisesPastTheCamera: a height mistyped in the map (300 m on a
+// house at the south of the disc) rose through the camera's own plane,
+// and the projection threw its corners 280,000 units out of a frame of
+// 1,600; a taller one came back inside out. Nothing is drawn above
+// tallest: every roof is above its own foot in the picture, on the pin
+// too, where the camera aims at it.
+func TestNoRoofRisesPastTheCamera(t *testing.T) {
+	number := regexp.MustCompile(`[ML](-?[0-9.]+),(-?[0-9.]+)`)
+	for _, radius := range []float64{MinRadius, MaxRadius, WidestRadius} {
+		top := tallest(radius)
+		for _, height := range []float64{300, 1000, 3659, 1e6} {
+			for _, pinned := range []bool{false, true} {
+				var sc scene
+				for i := range 50 { // the houses it stands among
+					sc.prisms = append(sc.prisms, box("", float64(i%10)*20-95, float64(i/10)*20+15, 10, 10, 9))
+				}
+				tower := box("", -5, -0.93*radius, 10, 10, height) // at the south of the disc
+				if pinned {
+					tower = box("", -5, -5, 10, 10, height)
+				}
+				// A part of it that stood wholly above what is drawn.
+				crown := box("", -5, tower.outer.pts[0].y, 10, 10, height+10)
+				crown.z0 = height
+				sc.prisms = append(sc.prisms, tower, crown)
+				pic := draw(sc, radius)
+				if pic.Pinned != pinned || pic.Buildings != 52 {
+					t.Fatalf("radius %v, %v m: pinned %v among %d buildings", radius, height, pic.Pinned, pic.Buildings)
+				}
+				if height > top && (tower.z1 != top || crown.z1 != top || crown.z0 != top-1) {
+					t.Errorf("radius %v: a %v m tower stands %v m and its crown from %v to %v, want them cut off at %v", radius, height, tower.z1, crown.z0, crown.z1, top)
+				}
+				target := 0.0
+				if pinned {
+					target = tower.z1
+				}
+				cam := newCamera(radius, target)
+				for _, p := range sc.prisms {
+					for _, q := range p.outer.pts {
+						if foot, roof := cam.project(q.x, q.y, p.z0), cam.project(q.x, q.y, p.z1); !(roof.y < foot.y) {
+							t.Fatalf("radius %v, %v m, pinned %v: a roof %v m up is drawn at %v, below its foot at %v", radius, height, pinned, p.z1, roof, foot)
+						}
+					}
+				}
+				svg := string(pic.SVG)
+				if strings.Contains(svg, "Inf") || strings.Contains(svg, "NaN") {
+					t.Fatalf("radius %v, %v m: the picture holds a number that is none", radius, height)
+				}
+				for _, m := range number.FindAllStringSubmatch(svg, -1) {
+					for _, v := range m[1:] {
+						if c, err := strconv.ParseFloat(v, 64); err != nil || math.Abs(c) > 4*Width {
+							t.Fatalf("radius %v, %v m, pinned %v: a point at %v (%v), frames away from the picture", radius, height, pinned, v, err)
+						}
+					}
+				}
+			}
+		}
+	}
+	// A real tower keeps its height: the tallest drawn at the closest
+	// disc is over 200 m.
+	if top := tallest(MinRadius); top < 200 || top > 250 {
+		t.Errorf("tallest(%v) = %v", MinRadius, top)
+	}
 }
 
 // TestAFootprintCutByATileEdgeIsOneBuilding: each tile draws its own side
@@ -715,7 +1056,7 @@ func TestDecodeTileRefusesWhatCannotBeDrawn(t *testing.T) {
 func TestWhatIsCutSouthIsBelowTheFrame(t *testing.T) {
 	cut := 0
 	for _, p := range places {
-		sc, _, err := loadScene(fixtures, p.Pin, MaxRadius+reachMargin)
+		sc, _, err := loadScene(t.Context(), fixtures, p.Pin, MaxRadius+reachMargin)
 		if err != nil {
 			t.Fatal(err)
 		}

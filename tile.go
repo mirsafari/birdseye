@@ -1,7 +1,7 @@
 package birdseye
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"io/fs"
 	"math"
@@ -16,11 +16,15 @@ const Zoom = 14
 const earthRadius = 6378137.0
 
 // Tiles is where the vector tiles come from: a PMTiles archive (package
-// pmtiles), a directory (DirTiles) or a file system (FSTiles). Tile
-// answers one tile in XYZ numbering, gzipped or not; a tile that does not
-// exist is nil with no error.
+// pmtiles), a directory (DirTiles) or a file system (FSTiles).
+//
+// Tile answers one tile in XYZ numbering, gzipped or not. A tile the
+// source does not hold is an error that is fs.ErrNotExist (to errors.Is),
+// as a missing file is; bytes with no error are a tile, also when there
+// are none of them. A source that can wait (a network, a slow disk) gives
+// up with the context's error once the context is done.
 type Tiles interface {
-	Tile(z, x, y int) ([]byte, error)
+	Tile(ctx context.Context, z, x, y int) ([]byte, error)
 }
 
 // FSTiles reads tiles from a file system holding <z>-<x>-<y>.pbf files, as
@@ -32,13 +36,13 @@ func DirTiles(dir string) Tiles { return fsTiles{os.DirFS(dir)} }
 
 type fsTiles struct{ fsys fs.FS }
 
-// Tile reads one tile file; a missing file is a missing tile.
-func (t fsTiles) Tile(z, x, y int) ([]byte, error) {
-	b, err := fs.ReadFile(t.fsys, fmt.Sprintf("%d-%d-%d.pbf", z, x, y))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+// Tile reads one tile file; a missing file is a missing tile, in the
+// file system's own words.
+func (t fsTiles) Tile(ctx context.Context, z, x, y int) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return b, err
+	return fs.ReadFile(t.fsys, fmt.Sprintf("%d-%d-%d.pbf", z, x, y))
 }
 
 // TilesFor lists the tiles (z, x, y) a picture of the pin can read: every
@@ -123,9 +127,10 @@ func (f frame) fromLocal(ox, oy, unit float64, p point) tpoint {
 	}
 }
 
-// maxTiles is the most tiles one picture reads. The widest disc of a pin
-// on the map takes 36 (at maxLatitude; 4 in Croatia), so only a radius
-// asked for through Options can reach it.
+// maxTiles is the most tiles one picture reads. A pin on the map takes at
+// most 36 at a place's own radius and 144 at WidestRadius (at
+// maxLatitude; 4 and 9 in Croatia), so no radius RenderWith lets through
+// reaches it: it bounds the list itself, whatever asks for it.
 const maxTiles = 256
 
 // tilesAround lists the tiles that cover a square of the given half-size

@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -91,7 +92,7 @@ func one(args []string) error {
 	from := fs.String("tiles", "", "a PMTiles archive or a tiles directory (default: the fixtures)")
 	lat := fs.Float64("lat", 0, "latitude")
 	lng := fs.Float64("lng", 0, "longitude")
-	radius := fs.Float64("radius", 0, "radius in metres (0: the place's own)")
+	radius := fs.Float64("radius", 0, fmt.Sprintf("radius in metres, up to %.0f (0: the place's own)", birdseye.WidestRadius))
 	out := fs.String("o", "birdseye.svg", "the SVG to write")
 	_ = fs.Parse(args)
 	src, err := open(*from)
@@ -100,7 +101,7 @@ func one(args []string) error {
 	}
 	defer src.Close()
 	start := time.Now()
-	pic, err := birdseye.RenderWith(src, birdseye.Pin{Lat: *lat, Lng: *lng}, birdseye.Options{Radius: *radius, DrawSparse: true})
+	pic, err := birdseye.RenderWith(context.Background(), src, birdseye.Pin{Lat: *lat, Lng: *lng}, birdseye.Options{Radius: *radius, DrawSparse: true})
 	if err != nil {
 		return err
 	}
@@ -143,12 +144,12 @@ func cut(args []string) error {
 				continue
 			}
 			seen[t] = true
-			data, err := src.Tile(t[0], t[1], t[2])
+			data, err := src.Tile(context.Background(), t[0], t[1], t[2])
+			if errors.Is(err, os.ErrNotExist) { // a tile the archive does not hold: sea, or abroad
+				continue
+			}
 			if err != nil {
 				return err
-			}
-			if data == nil {
-				continue
 			}
 			if err := os.WriteFile(filepath.Join(*out, fmt.Sprintf("%d-%d-%d.pbf", t[0], t[1], t[2])), data, 0o644); err != nil {
 				return err
